@@ -86,6 +86,7 @@ TELEGRAM
   bot setup|rotate|rebind
 
 MAINTENANCE
+  update                              git pull the latest + reinstall (+ restart bot)
   tools install|list                  install/list monitoring & utility tools
   doctor                              self-check the installation
   uninstall [--purge-logs] [--yes]
@@ -120,7 +121,7 @@ main() {
     list|status|log)      require_root; dispatch "$sub" "$@" ;;
     doctor)               require_root; dispatch doctor "$@" ;;
     # long-running / interactive: root, but must NOT hold the global lock
-    approve|agent)        require_root; dispatch "$sub" "$@" ;;
+    approve|agent|update) require_root; dispatch "$sub" "$@" ;;
     # mutating commands: root + global lock (short, serialized against gc)
     create|onboard|grant|revoke|freeze|unfreeze|delete|key|bot|connect-info|_gc)
       require_root

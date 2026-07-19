@@ -116,6 +116,10 @@ for d in lib profiles wrappers hooks bot systemd tmpfiles.d; do
   cp -a "$SRC/$d" "$PREFIX_LIB/$d"
 done
 install -m 0644 "$SRC/VERSION" "$PREFIX_LIB/VERSION"
+# Record the git checkout so `llm2ssh update` can self-update (git present only).
+if command -v git >/dev/null 2>&1 && git -C "$SRC" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  printf '%s\n' "$SRC" >"$PREFIX_LIB/.source"; chmod 0644 "$PREFIX_LIB/.source"
+fi
 # Make wrappers/hooks executable.
 [[ -d "$PREFIX_LIB/wrappers" ]] && chmod 0755 "$PREFIX_LIB/wrappers/"* 2>/dev/null || true
 [[ -d "$PREFIX_LIB/hooks" ]]    && chmod 0755 "$PREFIX_LIB/hooks/"* 2>/dev/null || true
@@ -123,8 +127,9 @@ install -m 0644 "$SRC/VERSION" "$PREFIX_LIB/VERSION"
 
 # Sudo-whitelisted wrappers go under a stable path referenced by sudoers.
 install -d -m 0755 "$PREFIX_LIB/bin"
-[[ -f "$SRC/wrappers/llm2ssh-svc" ]] && install -m 0755 "$SRC/wrappers/llm2ssh-svc" "$PREFIX_LIB/bin/llm2ssh-svc"
-[[ -f "$SRC/bot/relay-exec" ]]       && install -m 0755 "$SRC/bot/relay-exec"       "$PREFIX_LIB/bin/relay-exec"
+[[ -f "$SRC/wrappers/llm2ssh-svc" ]]       && install -m 0755 "$SRC/wrappers/llm2ssh-svc"       "$PREFIX_LIB/bin/llm2ssh-svc"
+[[ -f "$SRC/wrappers/llm2ssh-bot-admin" ]] && install -m 0755 "$SRC/wrappers/llm2ssh-bot-admin" "$PREFIX_LIB/bin/llm2ssh-bot-admin"
+[[ -f "$SRC/bot/relay-exec" ]]             && install -m 0755 "$SRC/bot/relay-exec"             "$PREFIX_LIB/bin/relay-exec"
 
 # CLI entrypoint.
 install -m 0755 "$SRC/bin/llm2ssh" "$PREFIX_BIN/llm2ssh"

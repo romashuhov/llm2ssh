@@ -74,6 +74,16 @@ If a soft-layer control is stripped, the hard layer still holds.
     (agents cannot read it); the token is scrubbed from logs. A stolen token
     permits DoS/phishing but **not** approvals — those require the bound owner's
     Telegram `from.id`.
+15a. **Bot owner-gate on BOTH paths.** Every command message AND every callback
+    is checked against `from.id == OWNER_USER_ID` and `chat.id == OWNER_CHAT_ID`.
+    Setup refuses to bind to a group/channel (private 1:1 only), so a stray group
+    member can never drive the bot even if the owner adds it to a group.
+15b. **Admin bot can never escalate to root.** With admin mode on, the bot manages
+    agents (onboard/grant/revoke/tools) via a root-owned wrapper
+    (`llm2ssh-bot-admin`) that hard-refuses `full`/sudo-ALL profiles and
+    delete/uninstall/create. The bot's sudoers whitelists only that wrapper for
+    those actions — so a compromised Telegram account cannot grant root or destroy
+    an agent from the phone.
 16. **`docker inspect`/`logs` leak env-var secrets.** `docker-ro` is read-only,
     not secret-free — documented in its `warn`.
 17. **`full` TTL is best-effort.** A root agent can stop the gc timer. Prefer

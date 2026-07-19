@@ -1,0 +1,61 @@
+#!/bin/bash
+# llm2ssh-bot-admin — the Telegram bot's ADMIN boundary. The bot's sudoers lets
+# it run ONLY this wrapper as root. It exposes a SAFE subset of llm2ssh and HARD
+# REFUSES anything privileged (grant `full` or any sudo-ALL profile) or
+# destructive (delete / uninstall). This is a security boundary — review every
+# line. All inputs come from Telegram messages and must never be trusted.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+unset IFS CDPATH
+
+LLM2SSH=/usr/local/bin/llm2ssh
+
+die() { echo "llm2ssh-bot-admin: $*" >&2; exit 3; }
+
+_valid_agent()        { [[ "${1:-}" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "bad agent name"; }
+_valid_profile_name() { [[ "${1:-}" =~ ^[a-z][a-z0-9-]{0,31}$ ]]   || die "bad profile name"; }
+_valid_ttl()          { [[ "${1:-}" =~ ^[0-9]+[smhd]$ ]]           || die "bad ttl"; }
+_valid_services()     { [[ "${1:-}" =~ ^[A-Za-z0-9_.@,-]+$ ]]      || die "bad services list"; }
+
+# Refuse `full` and ANY profile that grants sudo ALL (root-equivalent), including
+# custom sudo-all profiles — detected from `profile show`'s own output.
+_reject_privileged_profile() {
+  local p="$1"
+  [[ "$p" == "full" ]] && die "granting full (root) is not allowed from the bot"
+  if "$LLM2SSH" profile show "$p" 2>/dev/null | grep -qi 'UNRESTRICTED ROOT'; then
+    die "profile '$p' is root-equivalent; not allowed from the bot"
+  fi
+}
+
+verb="${1:-}"; shift || true
+case "$verb" in
+  list)     exec "$LLM2SSH" list --json ;;
+  profiles) exec "$LLM2SSH" profiles ;;
+  status)   [[ $# -le 1 ]] || die "too many args"
+            if [[ $# -eq 1 ]]; then _valid_agent "$1"; exec "$LLM2SSH" status "$1" --json; fi
+            exec "$LLM2SSH" status --json ;;
+  log)      _valid_agent "${1:-}"; exec "$LLM2SSH" log "$1" --since "1h" ;;
+  revoke)   _valid_agent "${1:-}"; exec "$LLM2SSH" revoke "$1" ;;
+  freeze)   _valid_agent "${1:-}"; exec "$LLM2SSH" freeze "$1" ;;
+  unfreeze) _valid_agent "${1:-}"; exec "$LLM2SSH" unfreeze "$1" ;;
+  tools)    exec "$LLM2SSH" tools install ;;
+  onboard)
+    _valid_agent "${1:-}"
+    prof="${2:-observer}"; _valid_profile_name "$prof"; _reject_privileged_profile "$prof"
+    exec "$LLM2SSH" onboard "$1" --profile "$prof"
+    ;;
+  grant)
+    _valid_agent "${1:-}"; _valid_profile_name "${2:-}"; _reject_privileged_profile "$2"
+    agent="$1"; prof="$2"; shift 2 || true
+    args=("$agent" "$prof")
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --ttl)      _valid_ttl "${2:-}";      args+=(--ttl "$2");      shift 2 ;;
+        --services) _valid_services "${2:-}"; args+=(--services "$2"); shift 2 ;;
+        *) die "flag not allowed from the bot: $1" ;;
+      esac
+    done
+    exec "$LLM2SSH" grant "${args[@]}"
+    ;;
+  *) die "verb '$verb' not allowed" ;;
+esac

@@ -25,6 +25,7 @@ RELAY_AGENT="${RELAY_AGENT:-}"
 APPROVAL_TIMEOUT_S="${APPROVAL_TIMEOUT_S:-60}"
 RELAY_TIMEOUT_S="${RELAY_TIMEOUT_S:-600}"
 ALLOW_UNFREEZE="${ALLOW_UNFREEZE:-true}"
+BOT_ADMIN="${BOT_ADMIN:-false}"
 
 STATE_DIR="/var/lib/llm2ssh/bot"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
@@ -104,23 +105,53 @@ _relay_enqueue() {
   printf '%s' "$1" >"$RELAY_SPOOL/$(date +%s%N).$$.msg"
 }
 
+# _bot_onboard AGENT [PROFILE] — run onboard via the admin wrapper and send the
+# resulting bootstrap (which contains a PRIVATE KEY) as a Telegram document.
+_bot_onboard() {
+  local agent="$1" prof="${2:-observer}" out rc errf
+  [[ -n "$agent" ]] || { tg_send_message "$OWNER_CHAT_ID" "usage: /onboard <agent> [profile]"; return; }
+  errf="$(mktemp)"
+  out="$(sudo -n "$BOT_ADMIN_BIN" onboard "$agent" "$prof" 2>"$errf")"; rc=$?
+  if [[ $rc -ne 0 || -z "$out" ]]; then
+    tg_send_message "$OWNER_CHAT_ID" "onboard failed: $(tail -n1 "$errf" 2>/dev/null)"
+    rm -f "$errf"; return
+  fi
+  rm -f "$errf"
+  local f; f="$(mktemp)"; printf '%s\n' "$out" >"$f"
+  tg_send_document "$OWNER_CHAT_ID" "$f" "⚠️ Contains a PRIVATE KEY for '$agent' (profile: $prof). It grants only that profile and is revocable via /freeze $agent. Paste into your agent's chat."
+  rm -f "$f"
+}
+
 # ---- message dispatch ------------------------------------------------------
 dispatch_message() {
-  local text="$1" word arg1 arg2
-  word="${text%% *}"; arg1=""; arg2=""
-  local rest="${text#"$word"}"; rest="${rest# }"
-  arg1="${rest%% *}"; arg2="${rest#"$arg1"}"; arg2="${arg2# }"
+  local text="$1" word rest
+  word="${text%% *}"; rest="${text#"$word"}"; rest="${rest# }"
+  local -a a=(); read -ra a <<<"$rest"
   case "$word" in
     /status) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_status)" ;;
     /docker) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_docker)" ;;
-    /log)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_log "$arg1" "${arg2:-20}")" ;;
-    /help)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_help)" ;;
-    /freeze) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_freeze freeze "$arg1")" ;;
+    /log)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_log "${a[0]:-}" "${a[1]:-20}")" ;;
+    /help)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_help "$BOT_ADMIN")" ;;
+    /freeze) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_freeze freeze "${a[0]:-}")" ;;
     /unfreeze)
-      if [[ "$ALLOW_UNFREEZE" == "true" ]]; then tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_freeze unfreeze "$arg1")"
+      if [[ "$ALLOW_UNFREEZE" == "true" ]]; then tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_freeze unfreeze "${a[0]:-}")"
       else tg_send_message "$OWNER_CHAT_ID" "unfreeze via Telegram is disabled; use SSH"; fi ;;
     /new)    rm -f "$RELAY_SESSION"; tg_send_message "$OWNER_CHAT_ID" "🆕 new conversation" ;;
     /start)  tg_send_message "$OWNER_CHAT_ID" "llm2ssh bot ready. /help for commands." ;;
+    # ---- admin commands (gated by BOT_ADMIN; wrapper still refuses full/delete) ----
+    /agents|/onboard|/grant|/revoke|/profiles|/tools)
+      if [[ "$BOT_ADMIN" != "true" ]]; then
+        tg_send_message "$OWNER_CHAT_ID" "admin commands are disabled on this bot."
+        return
+      fi
+      case "$word" in
+        /agents)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_agents)" ;;
+        /profiles) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_profiles)" ;;
+        /grant)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_grant "${a[0]:-}" "${a[1]:-}" "${a[2]:-}")" ;;
+        /revoke)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_revoke "${a[0]:-}")" ;;
+        /tools)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_tools)" ;;
+        /onboard)  _bot_onboard "${a[0]:-}" "${a[1]:-observer}" ;;
+      esac ;;
     *)       _relay_enqueue "$text"; tg_call sendChatAction --data-urlencode "chat_id=$OWNER_CHAT_ID" --data-urlencode "action=typing" >/dev/null 2>&1 || true ;;
   esac
 }
@@ -171,9 +202,13 @@ poll_loop() {
     for ((i=0; i<n; i++)); do
       offset="$(( $(jq -r ".result[$i].update_id" <<<"$upd") + 1 ))"
       # message?
-      local mchat; mchat="$(jq -r ".result[$i].message.chat.id // empty" <<<"$upd")"
+      local mchat mfrom
+      mchat="$(jq -r ".result[$i].message.chat.id // empty" <<<"$upd")"
+      mfrom="$(jq -r ".result[$i].message.from.id // empty" <<<"$upd")"
       if [[ -n "$mchat" ]]; then
-        if [[ "$mchat" != "$OWNER_CHAT_ID" ]]; then blog "ignoring message from chat $mchat"; continue; fi
+        # Gate on BOTH chat.id and from.id — same as the callback path. Without
+        # the from.id check, a bot bound to a group would obey ANY member.
+        if ! bot_msg_authorized "$mfrom" "$mchat"; then blog "ignoring message from chat $mchat user $mfrom"; continue; fi
         local text; text="$(jq -r ".result[$i].message.text // empty" <<<"$upd")"
         [[ -n "$text" ]] && dispatch_message "$text"
         continue

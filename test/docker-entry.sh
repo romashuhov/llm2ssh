@@ -6,7 +6,7 @@ set -euo pipefail
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq bats jq shellcheck >/dev/null
+apt-get install -y -qq bats jq shellcheck git >/dev/null
 
 cp -a /src /work
 cd /work

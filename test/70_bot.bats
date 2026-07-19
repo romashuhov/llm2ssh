@@ -96,6 +96,15 @@ setup() {
   [ ! -f /run/llm2ssh/approvals/res/11223344.json ]
 }
 
+@test "bot_msg_authorized requires BOTH owner user id and chat id" {
+  export OWNER_USER_ID=4242 OWNER_CHAT_ID=4242
+  bot_msg_authorized 4242 4242            # owner in bound chat -> ok
+  ! bot_msg_authorized 9999 4242          # other user in the (group) chat -> denied
+  ! bot_msg_authorized 4242 9999          # owner in another chat -> denied
+  unset OWNER_USER_ID
+  ! bot_msg_authorized 4242 4242          # no bound owner -> denied
+}
+
 @test "bot service unit is installed and marks NoNewPrivileges=no" {
   [ -f /etc/systemd/system/llm2ssh-bot.service ]
   grep -q 'NoNewPrivileges=no' /etc/systemd/system/llm2ssh-bot.service

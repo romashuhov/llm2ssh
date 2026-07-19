@@ -7,10 +7,16 @@
 _LLM2SSH_BOTHANDLERS_SOURCED=1
 
 L2="/usr/local/bin/llm2ssh"
+L2ADMIN="/usr/local/lib/llm2ssh/bin/llm2ssh-bot-admin"
 
 _h() { printf '%s\n' "$*"; }
 
+# _admin VERB ARGS... — run an admin action through the root-owned wrapper (which
+# hard-refuses full/delete). Echoes combined output for the reply.
+_admin() { sudo -n "$L2ADMIN" "$@" 2>&1; }
+
 bot_cmd_help() {
+  local admin="${1:-false}"
   cat <<'EOF'
 llm2ssh bot commands:
 /status          — server + agent status
@@ -20,9 +26,46 @@ llm2ssh bot commands:
 /unfreeze <agent>
 /new             — reset the chat-relay conversation
 /help            — this help
-Any other text is relayed to the on-server agent.
 EOF
+  if [[ "$admin" == "true" ]]; then
+    cat <<'EOF'
+
+admin:
+/agents               — list managed agents
+/onboard <a> [prof]   — create agent + issue a key (sent as a file)
+/grant <a> <prof> [ttl] — change permissions (full/delete are terminal-only)
+/revoke <a>           — drop back to base profile
+/profiles             — available permission profiles
+/tools                — install monitoring tools
+EOF
+  fi
+  printf 'Any other text is relayed to the on-server agent.\n'
 }
+
+# ---- admin handlers (all go through the hard-limited wrapper) --------------
+bot_cmd_agents() {
+  local out; out="$(_admin list)"
+  local n; n="$(jq 'length' <<<"$out" 2>/dev/null || echo '?')"
+  _h "agents: ${n}"
+  jq -r '.[]? | "  • \(.agent): \(.profile)\(if .frozen then "  [FROZEN]" else "" end)"' <<<"$out" 2>/dev/null || _h "$out"
+}
+
+bot_cmd_profiles() { _h "$(_admin profiles)"; }
+
+bot_cmd_grant() {
+  local agent="$1" prof="$2"; shift 2 || true
+  [[ -n "$agent" && -n "$prof" ]] || { _h "usage: /grant <agent> <profile> [ttl]"; return; }
+  local args=(grant "$agent" "$prof")
+  [[ -n "${1:-}" ]] && args+=(--ttl "$1")
+  _h "$(_admin "${args[@]}")"
+}
+
+bot_cmd_revoke() {
+  [[ -n "${1:-}" ]] || { _h "usage: /revoke <agent>"; return; }
+  _h "$(_admin revoke "$1")"
+}
+
+bot_cmd_tools() { _h "installing tools (may take a minute)…"; _admin tools >/dev/null 2>&1 & }
 
 bot_cmd_status() {
   local up load mem disk

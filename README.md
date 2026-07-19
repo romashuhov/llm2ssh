@@ -87,6 +87,13 @@ with the on-server agent — and approve or deny its dangerous commands with an
 inline **Allow / Deny** button. Human-in-the-loop, fail-closed: no answer means
 no. The bot answers only the chat you bound it to.
 
+**Manage everything from Telegram** (admin mode, on by default): `/agents`,
+`/onboard <name>` (issues a key, sent as a file), `/grant <name> <profile>`,
+`/revoke`, `/profiles`, `/tools`. The bot physically **cannot** grant `full`
+(root) or delete an agent — those go through a root-owned wrapper that hard-
+refuses them, so a compromised Telegram account can't escalate to root. Disable
+admin entirely with `llm2ssh bot setup --no-admin`.
+
 ## Commands
 
 ```
@@ -108,6 +115,17 @@ Run `llm2ssh help` for the full reference.
 
 Every shell script passes `shellcheck -S warning`; the test suite runs under
 `bats` in Ubuntu 24.04 and Debian 12 containers (`bash test/run.sh`).
+
+## Updating
+
+```bash
+sudo llm2ssh update        # git pull the latest + reinstall + restart the bot
+# or, from a clone:
+./update.sh                # same thing (git pull + sudo ./install.sh)
+```
+
+`install.sh` is upgrade-safe — it only replaces code under `/usr/local`, never
+your agents, keys, profiles, or logs.
 
 ## Development
 
