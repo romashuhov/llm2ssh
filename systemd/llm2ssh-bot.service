@@ -12,16 +12,12 @@ EnvironmentFile=/etc/llm2ssh/bot.env
 ExecStart=/usr/local/lib/llm2ssh/bot/llm2ssh-botd
 Restart=always
 RestartSec=5
-# The bot needs sudo (SUID), so NoNewPrivileges MUST stay 'no'. Do not "fix" this.
+# The bot's whole job is to run sudo (status/docker/freeze/grant, and relay as
+# an agent user), and grants WRITE /etc/sudoers.d. So NoNewPrivileges must be no,
+# and filesystem sandboxing is intentionally minimal — aggressive ProtectSystem/
+# ProtectHome would break sudo, the relay (needs /home/<agent>), and grants. The
+# real boundary is the bot's tight sudoers whitelist, not systemd confinement.
 NoNewPrivileges=no
-ProtectSystem=strict
-ReadWritePaths=/run/llm2ssh /var/lib/llm2ssh/bot
-ProtectHome=yes
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectControlGroups=yes
-StateDirectory=llm2ssh/bot
-LogsDirectory=llm2ssh
 
 [Install]
 WantedBy=multi-user.target

@@ -10,19 +10,24 @@ APPROVAL_REQ="$LLM2SSH_RUN/approvals/req"
 APPROVAL_RES="$LLM2SSH_RUN/approvals/res"
 APPROVAL_HB="$LLM2SSH_RUN/approvald.alive"
 
-approval_touch_hb() { : >"$APPROVAL_HB" 2>/dev/null || true; }
+# Wrap the redirection in a group so a failed open (should not happen — the file
+# is pre-created bot-owned by install/tmpfiles) is suppressed cleanly.
+approval_touch_hb() { { : >"$APPROVAL_HB"; } 2>/dev/null || true; }
 
 # Background heartbeat toucher; prints its PID. Caller must kill it on exit.
 # The subshell's fds MUST be redirected away from any command-substitution pipe,
 # otherwise `pid=$(approval_hb_daemon_start)` hangs waiting on the child.
 approval_hb_daemon_start() {
-  ( while true; do : >"$APPROVAL_HB" 2>/dev/null || true; sleep 5; done ) >/dev/null 2>&1 &
+  ( while true; do { : >"$APPROVAL_HB"; } 2>/dev/null || true; sleep 5; done ) >/dev/null 2>&1 &
   printf '%s' "$!"
 }
 
+# The spool dirs are created (correctly owned) by install.sh / tmpfiles.d as root.
+# Only try to create them here if missing, and never fail loudly — the bot user
+# cannot chown/chmod root-owned dirs and must not spew errors doing so.
 approval_ensure_spool() {
-  ensure_dir "$APPROVAL_REQ" 3770 "root:$LLM2SSH_GROUP"
-  ensure_dir "$APPROVAL_RES" 2750 "$LLM2SSH_BOT_USER:$LLM2SSH_GROUP" 2>/dev/null || ensure_dir "$APPROVAL_RES" 2750 "root:$LLM2SSH_GROUP"
+  [[ -d "$APPROVAL_REQ" ]] || ensure_dir "$APPROVAL_REQ" 3770 "root:$LLM2SSH_GROUP" 2>/dev/null || true
+  [[ -d "$APPROVAL_RES" ]] || ensure_dir "$APPROVAL_RES" 2750 "$LLM2SSH_BOT_USER:$LLM2SSH_GROUP" 2>/dev/null || true
 }
 
 # approval_pending — req ids, oldest first.

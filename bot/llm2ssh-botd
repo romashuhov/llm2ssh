@@ -73,7 +73,7 @@ spool_watcher() {
     approval_touch_hb
     # Advertise as a request-handler ONLY when admin mode is on (otherwise the bot
     # can't grant, so the request client falls back to printing the manual command).
-    [[ "$BOT_ADMIN" == "true" ]] && { : >"$BOTD_HB" 2>/dev/null || true; }
+    [[ "$BOT_ADMIN" == "true" ]] && { { : >"$BOTD_HB"; } 2>/dev/null || true; }
     # Pending approvals -> inline keyboard (once each).
     local id
     while IFS= read -r id; do

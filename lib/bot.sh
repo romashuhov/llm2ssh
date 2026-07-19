@@ -88,7 +88,7 @@ bot_install_service() {
   local src="$LLM2SSH_LIB/systemd/llm2ssh-bot.service"
   [[ -f "$src" ]] || src="/usr/local/lib/llm2ssh/systemd/llm2ssh-bot.service"
   [[ -f "$src" ]] || { warn "bot service unit not found; skipping"; return 0; }
-  install -m 0644 "$src" "$BOT_UNIT"
+  install -D -m 0644 "$src" "$BOT_UNIT"
   # Only touch systemd when it's actually the init system (skips containers).
   if have_cmd systemctl && [[ -d /run/systemd/system ]]; then
     systemctl daemon-reload || true

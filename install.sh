@@ -172,7 +172,8 @@ fi
 
 # ---- tmpfiles (runtime spool tree) -----------------------------------------
 if [[ -f "$PREFIX_LIB/tmpfiles.d/llm2ssh.conf" ]]; then
-  install -m 0644 "$PREFIX_LIB/tmpfiles.d/llm2ssh.conf" /etc/tmpfiles.d/llm2ssh.conf
+  # -D creates /etc/tmpfiles.d if it's missing (minimal / non-systemd hosts).
+  install -D -m 0644 "$PREFIX_LIB/tmpfiles.d/llm2ssh.conf" /etc/tmpfiles.d/llm2ssh.conf
   if command -v systemd-tmpfiles >/dev/null; then
     systemd-tmpfiles --create /etc/tmpfiles.d/llm2ssh.conf || _log "systemd-tmpfiles apply warned"
   fi
@@ -188,6 +189,13 @@ chown root:llm2ssh-bot  /run/llm2ssh/notify          && chmod 2770 /run/llm2ssh/
 chown llm2ssh-bot:llm2ssh-bot /run/llm2ssh/relay     && chmod 2770 /run/llm2ssh/relay
 chown root:llm2ssh     /run/llm2ssh/requests/req     && chmod 2770 /run/llm2ssh/requests/req
 chown llm2ssh-bot:llm2ssh     /run/llm2ssh/requests/res && chmod 2750 /run/llm2ssh/requests/res
+# Heartbeat files (bot-owned; the bot can't create them in the 0755 root dir).
+for hb in approvald.alive botd.alive; do
+  [[ -e "/run/llm2ssh/$hb" ]] || : >"/run/llm2ssh/$hb"
+  chown llm2ssh-bot:llm2ssh "/run/llm2ssh/$hb" && chmod 0644 "/run/llm2ssh/$hb"
+done
+# Bot state dir (offset, relay session) — bot-owned under the 0700 root var dir.
+install -d -o llm2ssh-bot -g llm2ssh -m 0750 /var/lib/llm2ssh/bot
 
 # ---- sshd hardening drop-in (only if sshd is installed) --------------------
 if command -v sshd >/dev/null && [[ -f "$SRC/templates/sshd-match.conf" ]]; then
