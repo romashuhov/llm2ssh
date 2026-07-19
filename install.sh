@@ -151,7 +151,9 @@ install -d -m 0755 /etc/llm2ssh/keys
 install -d -m 0755 /etc/llm2ssh/profiles.d
 install -d -m 0700 /var/lib/llm2ssh
 install -d -m 0700 /var/lib/llm2ssh/agents
-install -d -m 0700 /var/log/llm2ssh
+# -o/-g repairs ownership if an earlier bot unit's LogsDirectory chowned this to
+# the bot user; audit logs must stay root-only.
+install -d -o root -g root -m 0700 /var/log/llm2ssh
 
 # Default config — never clobber an existing one.
 if [[ ! -f /etc/llm2ssh/config ]]; then
