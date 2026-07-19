@@ -96,6 +96,24 @@ _allowed() { runuser -u "$1" -- sudo -n -l "${@:2}" >/dev/null 2>&1; }
   [ ! -f /etc/sudoers.d/llm2ssh-tester ]
 }
 
+@test "observer reads world-readable logs but NOT sensitive root:adm logs" {
+  "$L" grant tester observer
+  echo world  >/var/log/l2t-world.log;  chmod 0644 /var/log/l2t-world.log
+  echo secret >/var/log/l2t-secret.log; chown root:adm /var/log/l2t-secret.log; chmod 0640 /var/log/l2t-secret.log
+  runuser -u tester -- cat /var/log/l2t-world.log            # any user may read 0644
+  run runuser -u tester -- cat /var/log/l2t-secret.log       # 0640 root:adm -> denied
+  [ "$status" -ne 0 ]
+  rm -f /var/log/l2t-world.log /var/log/l2t-secret.log
+}
+
+@test "observer-logs CAN read sensitive root:adm logs" {
+  echo secret >/var/log/l2t-secret.log; chown root:adm /var/log/l2t-secret.log; chmod 0640 /var/log/l2t-secret.log
+  "$L" grant tester observer-logs
+  runuser -u tester -- cat /var/log/l2t-secret.log           # adm group -> allowed
+  "$L" revoke tester
+  rm -f /var/log/l2t-secret.log
+}
+
 @test "delete removes user, keys, and sudoers" {
   "$L" create scratch --key "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITESTKEYplaceholder0000000000000000000000 s@ci" >/dev/null
   "$L" grant scratch docker-ro >/dev/null
