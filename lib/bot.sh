@@ -180,6 +180,19 @@ cmd_bot() {
   esac
 }
 
+# _bot_read VAR PROMPT [--secret] — read a line into VAR from the controlling
+# terminal. Under `sudo` on some systems (and NAS boxes) the tool's stdin is not
+# a TTY, so a plain `read` gets EOF instantly; fall back to /dev/tty when it's
+# openable, else stdin (pipes, --unattended, tests still work).
+_bot_read() {
+  local __var="$1" __prompt="$2" __secret="${3:-}" __src="/dev/stdin" __opt=() __val=""
+  [[ "$__secret" == "--secret" ]] && __opt=(-s)
+  if [[ ! -t 0 ]] && { : </dev/tty; } 2>/dev/null; then __src="/dev/tty"; fi
+  IFS= read -r ${__opt[@]+"${__opt[@]}"} -p "$__prompt" __val <"$__src" || __val=""
+  [[ "$__secret" == "--secret" ]] && echo >&2
+  printf -v "$__var" '%s' "$__val"
+}
+
 _bot_status() {
   if [[ -f "$BOT_CONFIG" ]]; then
     log "bot configured (config: $BOT_CONFIG, perms $(stat -c '%a %U:%G' "$BOT_CONFIG" 2>/dev/null))"
@@ -217,8 +230,8 @@ _bot_setup() {
   have_cmd jq || die "jq required"
   have_cmd curl || die "curl required for interactive setup"
   local tok
-  read -r -s -p "Bot token from @BotFather: " tok; echo >&2
-  [[ -n "$tok" ]] || die "no token entered"
+  _bot_read tok "Bot token from @BotFather: " --secret
+  [[ -n "$tok" ]] || die "no token entered (need a terminal; or use: llm2ssh bot setup --unattended --token '<token>' --chat-id '<id>')"
   # `|| true`: curl returns non-zero on a bad token / network error, which under
   # `set -e` would abort silently. We want to inspect the body and report clearly.
   local me; me="$(TG_TOKEN="$tok" tg_call getMe || true)"
@@ -253,7 +266,7 @@ _bot_setup() {
   done
   [[ -n "$user_id" ]] || die "handshake timed out; re-run 'llm2ssh bot setup'"
 
-  read -r -p "Relay chat to which on-server agent (blank to disable relay): " agent
+  _bot_read agent "Relay chat to which on-server agent (blank to disable relay): "
   bot_write_config "$tok" "$chat_id" "$user_id" "$agent" "$admin"
   bot_install_sudoers "$agent" "$admin_flag"
   bot_install_service
@@ -266,7 +279,7 @@ _bot_rotate() {
   [[ -f "$BOT_CONFIG" ]] || die "bot not configured"
   # shellcheck disable=SC1090
   . "$BOT_CONFIG"
-  local tok; read -r -s -p "New bot token: " tok; echo >&2
+  local tok; _bot_read tok "New bot token: " --secret
   [[ -n "$tok" ]] || die "no token entered"
   bot_write_config "$tok" "$OWNER_CHAT_ID" "$OWNER_USER_ID" "${RELAY_AGENT:-}"
   have_cmd systemctl && systemctl restart llm2ssh-bot 2>/dev/null || true
