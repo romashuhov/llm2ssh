@@ -1,6 +1,7 @@
 name        docker-admin
 description docker-ro + container lifecycle (start/stop/restart/pull/rm/prune).
 include     docker-ro
+requestable yes
 sudo        %DOCKER% start *
 sudo        %DOCKER% stop *
 sudo        %DOCKER% restart *

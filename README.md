@@ -94,6 +94,13 @@ no. The bot answers only the chat you bound it to.
 refuses them, so a compromised Telegram account can't escalate to root. Disable
 admin entirely with `llm2ssh bot setup --no-admin`.
 
+**Agents can request access.** When an agent hits a wall, it runs
+`llm2ssh-request <profile> --reason "..."` (profiles are marked `requestable`;
+`full` never is). You get a Telegram card describing what the access grants, with
+**1h / 4h / 1d / Forever / Deny** buttons — tap one and the agent continues. No
+bot connected? The agent is handed the exact `llm2ssh grant …` command for you to
+run. See [docs/PROFILES.md](docs/PROFILES.md#access-requests).
+
 ## Commands
 
 ```

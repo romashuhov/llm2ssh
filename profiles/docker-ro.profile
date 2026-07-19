@@ -1,6 +1,7 @@
 name        docker-ro
 description Read-only Docker: ps, logs, stats, inspect, images, compose ls/ps/logs.
 include     observer
+requestable yes
 # Docker access via sudo whitelist only — the docker group is NEVER used (== root).
 # %DOCKER% resolves to the real docker binary at grant time (handles snap).
 sudo        %DOCKER% ps

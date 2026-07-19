@@ -129,6 +129,7 @@ fi
 install -d -m 0755 "$PREFIX_LIB/bin"
 [[ -f "$SRC/wrappers/llm2ssh-svc" ]]       && install -m 0755 "$SRC/wrappers/llm2ssh-svc"       "$PREFIX_LIB/bin/llm2ssh-svc"
 [[ -f "$SRC/wrappers/llm2ssh-bot-admin" ]] && install -m 0755 "$SRC/wrappers/llm2ssh-bot-admin" "$PREFIX_LIB/bin/llm2ssh-bot-admin"
+[[ -f "$SRC/wrappers/llm2ssh-du" ]]        && install -m 0755 "$SRC/wrappers/llm2ssh-du"        "$PREFIX_LIB/bin/llm2ssh-du"
 [[ -f "$SRC/bot/relay-exec" ]]             && install -m 0755 "$SRC/bot/relay-exec"             "$PREFIX_LIB/bin/relay-exec"
 
 # CLI entrypoint.
@@ -140,6 +141,8 @@ for helper in llm2ssh-ctx; do
 done
 # Approval client (called by hook as agent, and by gated sudo wrappers).
 [[ -f "$SRC/wrappers/llm2ssh-approve" ]] && install -m 0755 "$SRC/wrappers/llm2ssh-approve" "$PREFIX_BIN/llm2ssh-approve"
+# Access-request client (run by the agent to ask the owner for more access).
+[[ -f "$SRC/wrappers/llm2ssh-request" ]] && install -m 0755 "$SRC/wrappers/llm2ssh-request" "$PREFIX_BIN/llm2ssh-request"
 
 # ---- Create state/config dirs (preserve existing) --------------------------
 _log "creating state directories"
@@ -176,12 +179,15 @@ if [[ -f "$PREFIX_LIB/tmpfiles.d/llm2ssh.conf" ]]; then
 fi
 # Create the /run tree explicitly too (works in containers / before first boot).
 mkdir -p /run/llm2ssh/agents /run/llm2ssh/approvals/req /run/llm2ssh/approvals/res \
-         /run/llm2ssh/notify /run/llm2ssh/relay
-chmod 0755 /run/llm2ssh /run/llm2ssh/agents /run/llm2ssh/approvals
+         /run/llm2ssh/notify /run/llm2ssh/relay \
+         /run/llm2ssh/requests/req /run/llm2ssh/requests/res
+chmod 0755 /run/llm2ssh /run/llm2ssh/agents /run/llm2ssh/approvals /run/llm2ssh/requests
 chown root:llm2ssh     /run/llm2ssh/approvals/req    && chmod 3770 /run/llm2ssh/approvals/req
 chown llm2ssh-bot:llm2ssh     /run/llm2ssh/approvals/res && chmod 2750 /run/llm2ssh/approvals/res
 chown root:llm2ssh-bot  /run/llm2ssh/notify          && chmod 2770 /run/llm2ssh/notify
 chown llm2ssh-bot:llm2ssh-bot /run/llm2ssh/relay     && chmod 2770 /run/llm2ssh/relay
+chown root:llm2ssh     /run/llm2ssh/requests/req     && chmod 2770 /run/llm2ssh/requests/req
+chown llm2ssh-bot:llm2ssh     /run/llm2ssh/requests/res && chmod 2750 /run/llm2ssh/requests/res
 
 # ---- sshd hardening drop-in (only if sshd is installed) --------------------
 if command -v sshd >/dev/null && [[ -f "$SRC/templates/sshd-match.conf" ]]; then

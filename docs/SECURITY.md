@@ -31,7 +31,11 @@ If a soft-layer control is stripped, the hard layer still holds.
    root-equivalent** (`docker run -v /:/host …`). They belong only to `full`,
    never to `docker-admin`.
 3. **sudoers `*` spans multiple words, including flags.** Never wildcard a path
-   argument or a command where a flag can reach files.
+   argument or a command where a flag can reach files. Even "read-only" tools bite:
+   `sudo du *` lets `du --files0-from=/etc/shadow` leak file contents as root, so
+   `du` is on the denylist and disk-audit uses a root-owned `llm2ssh-du` wrapper
+   that forces an absolute dir and `--`. Treat any tool with a "read paths/flags
+   from a file" option (`--files0-from`, `-T`, `@file`, `--from-file`) the same.
 4. **A comma / `:` / `=` / `\` in a profile `sudo` line is alias injection.** The
    parser rejects them.
 5. **Never whitelist shell/pager/interpreter escapes** (`bash`, `less`, `vi`,

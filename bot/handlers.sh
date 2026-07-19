@@ -26,6 +26,7 @@ llm2ssh bot commands:
 /unfreeze <agent>
 /new             — reset the chat-relay conversation
 /help            — this help
+(agents can also request access; you'll get a card with duration buttons)
 EOF
   if [[ "$admin" == "true" ]]; then
     cat <<'EOF'

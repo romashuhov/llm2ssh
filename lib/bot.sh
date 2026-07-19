@@ -11,6 +11,12 @@ BOT_SUDOERS="$LLM2SSH_SUDOERSD/llm2ssh-bot"
 BOT_UNIT="/etc/systemd/system/llm2ssh-bot.service"
 BOT_RELAY_BIN="/usr/local/lib/llm2ssh/bin/relay-exec"
 BOT_ADMIN_BIN="/usr/local/lib/llm2ssh/bin/llm2ssh-bot-admin"
+# Access-request spool + the bot's own heartbeat (the request client checks this
+# specifically, so a running local TTY approver isn't mistaken for the bot).
+REQUEST_REQ="$LLM2SSH_RUN/requests/req"
+REQUEST_RES="$LLM2SSH_RUN/requests/res"
+# shellcheck disable=SC2034  # BOTD_HB is consumed by llm2ssh-botd
+BOTD_HB="$LLM2SSH_RUN/botd.alive"
 
 # ---- sudoers (the bot's ENTIRE privilege surface) --------------------------
 # Correct argument forms (M6): freeze/unfreeze/status/log/list all take args.
@@ -93,6 +99,55 @@ bot_install_service() {
 # are ignored, not just commands from other chats.
 bot_msg_authorized() {
   [[ -n "${OWNER_USER_ID:-}" && "$1" == "$OWNER_USER_ID" && "$2" == "$OWNER_CHAT_ID" ]]
+}
+
+# bot_request_write_res ID DECISION [NOTE] — mint an access-request decision.
+bot_request_write_res() {
+  local id="$1" decision="$2" note="${3:-}" res tmp
+  res="$REQUEST_RES/$id.json"; tmp="$REQUEST_RES/.$id.tmp.$$"
+  jq -n --arg id "$id" --arg d "$decision" --arg n "$note" --argjson at "$(now_epoch)" \
+     '{id:$id, decision:$d, note:$n, decided_at:$at}' >"$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+  chmod 0640 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$res"
+}
+
+# bot_request_decide FROM_ID CHAT_ID CALLBACK_DATA -> handle an access-request
+# button. Owner-gated. The requesting agent is taken from the req FILE OWNER
+# (authoritative — an agent cannot request access for another user). The grant
+# goes through the admin wrapper, which still refuses full/root-equivalent.
+# Echoes the outcome word for the daemon to show; returns non-zero if the presser
+# isn't the owner or the callback is malformed.
+bot_request_decide() {
+  local from="$1" chat="$2" data="$3"
+  [[ "$from" == "${OWNER_USER_ID:-}" && "$chat" == "${OWNER_CHAT_ID:-}" ]] || return 1
+  # The PROFILE comes from the callback (== what the owner saw on the card), NOT
+  # re-read from the agent-owned file — otherwise the agent could bait-and-switch
+  # to a more privileged profile after the card was sent.
+  [[ "$data" =~ ^g:([0-9a-f]{8}):(1h|4h|1d|0|x):([a-z][a-z0-9-]{0,31})$ ]] || return 1
+  local id="${BASH_REMATCH[1]}" ttl="${BASH_REMATCH[2]}" profile="${BASH_REMATCH[3]}"
+  local reqf="$REQUEST_REQ/$id.json"
+  [[ -f "$reqf" ]] || { printf 'expired'; return 0; }
+  # The requesting AGENT is the file owner (authoritative — not spoofable).
+  local agent
+  agent="$(stat -c %U "$reqf" 2>/dev/null || echo '')"
+  if [[ ! "$agent" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+    bot_request_write_res "$id" error "malformed request"; rm -f "$reqf"; printf 'error'; return 0
+  fi
+  if [[ "$ttl" == "x" ]]; then
+    bot_request_write_res "$id" denied ""; rm -f "$reqf"; printf 'denied'; return 0
+  fi
+  # Defense in depth: only requestable profiles, and never root-equivalent (the
+  # admin wrapper also refuses these).
+  if ! profile_is_requestable "$profile"; then
+    bot_request_write_res "$id" error "'$profile' is not requestable"; rm -f "$reqf"; printf 'error'; return 0
+  fi
+  local args=(grant "$agent" "$profile")
+  [[ "$ttl" != "0" ]] && args+=(--ttl "$ttl")
+  if sudo -n "$BOT_ADMIN_BIN" "${args[@]}" >/dev/null 2>&1; then
+    bot_request_write_res "$id" granted "$([[ "$ttl" == "0" ]] && echo permanent || echo "$ttl")"
+    rm -f "$reqf"; printf 'granted'; return 0
+  fi
+  bot_request_write_res "$id" error "could not grant (needs the terminal?)"; rm -f "$reqf"; printf 'error'; return 0
 }
 
 # bot_decide FROM_ID CHAT_ID CALLBACK_DATA -> writes the approval res if and only

@@ -10,6 +10,7 @@ export LLM2SSH_LIB
 # shellcheck source=/dev/null
 . "$LLM2SSH_LIB/lib/common.sh"
 . "$LLM2SSH_LIB/lib/state.sh"
+. "$LLM2SSH_LIB/lib/profile.sh"
 . "$LLM2SSH_LIB/lib/approve.sh"
 . "$LLM2SSH_LIB/bot/tg-api.sh"
 . "$LLM2SSH_LIB/lib/bot.sh"
@@ -35,12 +36,44 @@ RELAY_SESSION="$STATE_DIR/relay.session"
 
 blog() { printf '%s botd: %s\n' "$(date -u '+%FT%TZ')" "$(tg_scrub "$*")" >&2; }
 
-# ---- spool_watcher: heartbeat + approvals + notifications ------------------
+# _profile_desc PROFILE -> its description line (world-readable profile files).
+_profile_desc() {
+  local p="$1" f
+  for f in /etc/llm2ssh/profiles.d/"$p".profile /usr/local/lib/llm2ssh/profiles/"$p".profile; do
+    [[ -r "$f" ]] && { sed -n 's/^description[[:space:]]*//p' "$f" | head -n1; return; }
+  done
+}
+
+# _bot_request_card ID AGENT PROFILE REASON — send the owner an access-request card.
+_bot_request_card() {
+  local id="$1" agent="$2" profile="$3" reason="$4" desc kb text
+  desc="$(_profile_desc "$profile")"
+  # Pin the profile INTO the callback data (what the owner is shown == what gets
+  # granted), so the agent can't rewrite the request file after the card is sent.
+  kb="$(jq -nc \
+        --arg h1 "g:$id:1h:$profile" --arg h4 "g:$id:4h:$profile" --arg d1 "g:$id:1d:$profile" \
+        --arg f "g:$id:0:$profile" --arg x "g:$id:x:$profile" '
+    [ [ {text:"⏱ 1h",callback_data:$h1}, {text:"⏱ 4h",callback_data:$h4}, {text:"⏱ 1d",callback_data:$d1} ],
+      [ {text:"♾ Forever",callback_data:$f}, {text:"❌ Deny",callback_data:$x} ] ]')"
+  text="🔐 Access request from agent '$agent'
+Profile: $profile — ${desc:-(details: llm2ssh profile show $profile)}"
+  [[ -n "$reason" ]] && text+="
+Agent's reason (untrusted): $reason"
+  text+="
+Grant for how long?"
+  tg_send_keyboard "$OWNER_CHAT_ID" "$text" "$kb"
+}
+
+# ---- spool_watcher: heartbeat + approvals + requests + notifications --------
 spool_watcher() {
   approval_ensure_spool
-  declare -A notified=()
+  mkdir -p "$REQUEST_REQ" "$REQUEST_RES" 2>/dev/null || true
+  declare -A notified=() rnotified=()
   while true; do
     approval_touch_hb
+    # Advertise as a request-handler ONLY when admin mode is on (otherwise the bot
+    # can't grant, so the request client falls back to printing the manual command).
+    [[ "$BOT_ADMIN" == "true" ]] && { : >"$BOTD_HB" 2>/dev/null || true; }
     # Pending approvals -> inline keyboard (once each).
     local id
     while IFS= read -r id; do
@@ -56,6 +89,29 @@ spool_watcher() {
       tg_send_keyboard "$OWNER_CHAT_ID" "🛑 Approval needed ($user): $cmd (auto-deny in ${APPROVAL_TIMEOUT_S}s)" "$kb"
       notified[$id]=1
     done < <(approval_pending)
+    # Pending ACCESS requests -> a card with duration buttons (once each). The
+    # agent is taken from the req FILE OWNER, not the (spoofable) json field.
+    # Only when admin mode is on (the grant itself goes through the admin wrapper).
+    local rf rid ragent rprofile rreason
+    for rf in "$REQUEST_REQ"/*.json; do
+      [[ "$BOT_ADMIN" == "true" ]] || break
+      [[ -e "$rf" ]] || continue
+      rid="$(basename "$rf" .json)"
+      [[ -n "${rnotified[$rid]:-}" ]] && continue
+      ragent="$(stat -c %U "$rf" 2>/dev/null || echo '')"
+      rprofile="$(jq -r '.profile // ""' "$rf" 2>/dev/null || echo '')"
+      # Sanitize the agent-controlled reason server-side too (an agent can write
+      # req/ directly, bypassing the client): strip newlines so it can't inject
+      # fake lines into the card, and cap the length.
+      rreason="$(jq -r '.reason // ""' "$rf" 2>/dev/null | tr -d '\r\n' | cut -c1-200 || echo '')"
+      # ignore malformed / non-requestable / frozen-agent requests
+      if [[ ! "$ragent" =~ ^[a-z_][a-z0-9_-]{0,31}$ || ! "$rprofile" =~ ^[a-z][a-z0-9-]{0,31}$ ]] \
+         || ! profile_is_requestable "$rprofile" || approval_is_frozen "$ragent"; then
+        rnotified[$rid]=1; continue
+      fi
+      _bot_request_card "$rid" "$ragent" "$rprofile" "$rreason"
+      rnotified[$rid]=1
+    done
     # Notifications.
     local f
     for f in "$LLM2SSH_RUN"/notify/*.json; do
@@ -166,6 +222,15 @@ dispatch_callback() {
       else
         tg_answer_callback "$cbid" "not authorized"
         blog "rejected callback from $from (not owner)"
+      fi ;;
+    g:*)
+      local outcome
+      if outcome="$(bot_request_decide "$from" "$chat" "$data")"; then
+        tg_answer_callback "$cbid" "$outcome"
+        tg_edit_message "$chat" "$msgid" "access request: $outcome"
+      else
+        tg_answer_callback "$cbid" "not authorized"
+        blog "rejected access callback from $from (not owner)"
       fi ;;
     *) tg_answer_callback "$cbid" "unknown" ;;
   esac

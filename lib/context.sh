@@ -46,9 +46,23 @@ context_render() {
     local w
     for w in ${P_WARN[@]+"${P_WARN[@]}"}; do printf '> NOTE: %s\n' "$w"; done
     printf '\n## Rules\n\n'
-    printf '1. Do NOT try to escalate privileges or work around a denied command. Denials are policy, not bugs.\n'
+    printf '1. Do NOT try to bypass or work around a denied command. If you need more, REQUEST it (below) — never escalate on your own.\n'
     printf '2. If a command is denied, re-run `llm2ssh-ctx` — your profile may have changed — then adapt.\n'
     printf '3. All your commands are logged and visible to the owner.\n'
+
+    # Requestable profiles: the sanctioned way to ask for more access.
+    local reqlist="" rp rdesc
+    while IFS= read -r rp; do
+      [[ -z "$rp" ]] && continue
+      rdesc="$(sed -n 's/^description[[:space:]]*//p' "$(profile_file "$rp")" 2>/dev/null | head -n1)"
+      reqlist+="- \`$rp\` — ${rdesc:-}"$'\n'
+    done < <(list_requestable_profiles)
+    if [[ -n "$reqlist" ]]; then
+      printf '\n## Need more access? Ask — do not work around it\n\n'
+      printf 'Run: `llm2ssh-request <profile> --reason "why you need it"`\n'
+      printf 'The owner approves it (via Telegram) for a chosen duration; if no bot is connected you get the exact command for the owner to run. Then re-run your command.\n\n'
+      printf 'Profiles you may request:\n%s' "$reqlist"
+    fi
     # List a few monitoring tools that are actually installed, so the agent
     # knows to reach for them (most need no sudo).
     local htools="" t

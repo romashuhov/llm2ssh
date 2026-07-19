@@ -1,0 +1,20 @@
+#!/bin/bash
+# llm2ssh-du — safe, read-only disk-size reporter for the `disk-audit` profile.
+# Runs `du` as root on ONE directory with NO arbitrary-file-read: the argument
+# must be an absolute path, and `--` stops option parsing so an argument like
+# `--files0-from=/etc/shadow` can't be smuggled in (which would leak file
+# contents via du's diagnostics). Raw `sudo du *` is intentionally NOT granted.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+unset IFS
+
+dir="${1:-/}"
+depth="${2:-1}"
+case "$dir" in
+  /*) ;;                    # must be an absolute path
+  *) echo "usage: llm2ssh-du <absolute-dir> [depth 0-3]" >&2; exit 2 ;;
+esac
+case "$dir" in *$'\n'*) echo "bad path" >&2; exit 2 ;; esac
+[[ "$depth" =~ ^[0-3]$ ]] || depth=1
+
+exec du -xh --max-depth="$depth" -- "$dir"

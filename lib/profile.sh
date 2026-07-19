@@ -22,7 +22,7 @@ _LLM2SSH_PROFILE_SOURCED=1
 _LLM2SSH_SUDO_DENYLIST="\
 bash sh dash zsh ksh csh tcsh \
 env find vi vim vim.basic view nano less more most pager man info \
-tar rsync dd tee cp mv install \
+tar rsync dd tee cp mv install du \
 awk gawk mawk sed perl python python2 python3 ruby node nodejs php lua \
 xargs script expect socat nc ncat netcat ncat.openbsd \
 ssh scp sftp wget curl ftp tftp \
@@ -119,6 +119,7 @@ _profile_parse_into() {
       group)       P_GROUPS+=("$rest") ;;
       warn)        P_WARN+=("$rest") ;;
       ask)         P_ASK+=("$rest") ;;
+      requestable) [[ "$is_include" == 0 && "$rest" == "yes" ]] && P_REQUESTABLE=1 ;;
       needs-services) [[ "$rest" == "yes" ]] && P_NEEDS_SERVICES=1 ;;
       sudo-all)       [[ "$rest" == "yes" ]] && P_SUDO_ALL=1 ;;
       include)
@@ -157,9 +158,25 @@ profile_load() {
   file="$(profile_file "$name")" || die_notfound "no such profile: '$name'"
   P_NAME="$name"; P_DESC=""
   P_GROUPS=(); P_SUDO=(); P_WARN=(); P_ASK=()
-  P_NEEDS_SERVICES=0; P_SUDO_ALL=0
+  P_NEEDS_SERVICES=0; P_SUDO_ALL=0; P_REQUESTABLE=0
   _PROFILE_VISITED=" $name "     # top profile counts as visited (self-include guard)
   _profile_parse_into "$file"
+}
+
+# profile_is_requestable NAME -> 0 if the profile file carries `requestable yes`.
+# Cheap grep (no full parse) — used by the request client, bot, and context.
+profile_is_requestable() {
+  local f; f="$(profile_file "$1")" || return 1
+  grep -qE '^[[:space:]]*requestable[[:space:]]+yes([[:space:]]|$)' "$f"
+}
+
+# list_requestable_profiles -> names an agent may request (one per line).
+list_requestable_profiles() {
+  local n
+  while IFS= read -r n; do
+    [[ -z "$n" ]] && continue
+    profile_is_requestable "$n" && printf '%s\n' "$n"
+  done < <(list_profile_names)
 }
 
 # list_profile_names — all available profile names (custom shadow shipped).
@@ -207,6 +224,7 @@ cmd_profile() {
         printf 'sudo: (none)\n'
       fi
       [[ "$P_NEEDS_SERVICES" -eq 1 ]] && printf 'requires: --services <unit,...>\n'
+      [[ "$P_REQUESTABLE" -eq 1 ]] && printf 'requestable: yes (an agent may ask for this via llm2ssh-request)\n'
       if [[ ${#P_ASK[@]} -gt 0 ]]; then
         printf 'owner approval required for:\n'
         local a; for a in "${P_ASK[@]}"; do printf '  %s\n' "$a"; done

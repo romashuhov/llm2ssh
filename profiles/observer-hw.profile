@@ -1,6 +1,7 @@
 name        observer-hw
 description observer + read-only hardware/SMART/DMI info (a few commands need root).
 include     observer
+requestable yes
 # dmidecode with NO arguments = a full, read-only DMI/BIOS/memory dump. Pinning
 # it to no-args is CRITICAL: `dmidecode --dump-bin FILE` would WRITE a file as
 # root. In sudoers, "" means "exactly no arguments".

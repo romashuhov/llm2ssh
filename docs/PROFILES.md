@@ -90,6 +90,31 @@ smartmontools, dmidecode, bind9-dnsutils, tree…). Most work **without sudo**.
 A few tools (`smartctl`, `dmidecode`, `nvme`) need root to read a device — the
 `observer-hw` profile grants the safe, read-only forms.
 
+## Access requests
+
+Profiles marked `requestable yes` can be **asked for by the agent itself** — the
+sanctioned alternative to working around a denial. The agent runs:
+
+```bash
+llm2ssh-request <profile> --reason "why you need it"
+```
+
+- **Bot connected:** the owner gets a Telegram card (profile + what it grants +
+  the agent's reason) with **1h / 4h / 1d / Forever / Deny** buttons. Tapping a
+  duration grants it (via the admin wrapper, so still never `full`); the agent
+  continues.
+- **No bot:** the agent is handed the exact `sudo llm2ssh grant …` command for
+  the owner to run.
+
+Security: an agent can only request `requestable` profiles (never `full`/root),
+and the bot takes the requesting agent from the **request file's owner**, not any
+self-declared field — so one agent can't request access for another. Shipped
+requestable profiles: `disk-audit`, `docker-ro`, `docker-admin`, `observer-logs`,
+`observer-hw`. Mark your own with `requestable yes`.
+
+`disk-audit` is a ready example: read-only `du`, `docker system df`, and journal
+usage — exactly enough to find what fills a disk, nothing to change it.
+
 ## How profiles reach the agent
 
 - **OS enforcement**: the generated sudoers file (the hard wall).

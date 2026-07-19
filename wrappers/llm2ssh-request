@@ -1,0 +1,101 @@
+#!/bin/bash
+# llm2ssh-request — the AGENT-facing access-request client. Run by the agent
+# (unprivileged) to ask the owner for a higher permission profile.
+#
+#   llm2ssh-request <profile> [--reason "why"]
+#
+# If the Telegram bot is connected, the request is sent to the owner with buttons
+# to grant it (for a chosen duration or permanently). If not, the exact command
+# for the owner to run is printed instead. The agent can only ask for profiles
+# marked `requestable` — never `full`.
+set -euo pipefail
+
+RUN=/run/llm2ssh
+REQ="$RUN/requests/req"
+RES="$RUN/requests/res"
+BOT_HB="$RUN/botd.alive"
+SYS_PROFILES=/usr/local/lib/llm2ssh/profiles
+ETC_PROFILES=/etc/llm2ssh/profiles.d
+LLM2SSH=/usr/local/bin/llm2ssh
+WAIT_S=180
+
+agent="$(id -un)"
+profile="${1:-}"; shift || true
+reason=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --reason) reason="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[[ -n "$profile" ]] || { echo "usage: llm2ssh-request <profile> [--reason \"why\"]" >&2; exit 2; }
+[[ "$profile" =~ ^[a-z][a-z0-9-]{0,31}$ ]] || { echo "bad profile name" >&2; exit 2; }
+
+# Locate the profile file (custom dir shadows shipped) and check requestability.
+pf=""
+for d in "$ETC_PROFILES" "$SYS_PROFILES"; do
+  [[ -r "$d/$profile.profile" ]] && { pf="$d/$profile.profile"; break; }
+done
+[[ -n "$pf" ]] || { echo "no such profile: '$profile' (see: $LLM2SSH profiles)" >&2; exit 2; }
+grep -qE '^[[:space:]]*requestable[[:space:]]+yes([[:space:]]|$)' "$pf" \
+  || { echo "profile '$profile' cannot be requested — ask the owner directly." >&2; exit 2; }
+
+manual="sudo $LLM2SSH grant $agent $profile --ttl 4h   # (drop --ttl for permanent)"
+
+bot_alive() {
+  [[ -f "$BOT_HB" ]] || return 1
+  [[ $(( $(date +%s) - $(stat -c %Y "$BOT_HB" 2>/dev/null || echo 0) )) -le 30 ]]
+}
+
+# No Telegram channel -> hand the owner the exact command to run.
+if ! bot_alive; then
+  cat >&2 <<EOF
+No Telegram approval channel is connected, so access can't be requested automatically.
+Ask the owner to run this on the server, then re-run your command:
+
+    $manual
+EOF
+  exit 3
+fi
+
+command -v jq >/dev/null 2>&1 || { echo "jq required" >&2; exit 3; }
+
+id="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+reason="$(printf '%s' "$reason" | tr -d '\r\n' | cut -c1-300)"
+req="$(jq -nc --arg id "$id" --arg u "$agent" --arg p "$profile" --arg r "$reason" \
+        --argjson ts "$(date +%s)" \
+        '{id:$id, ts:$ts, type:"access-request", user:$u, profile:$p, reason:$r}')" \
+  || { echo "could not build request" >&2; exit 3; }
+( umask 027; printf '%s' "$req" >"$REQ/.$id.tmp" ) && mv -f "$REQ/.$id.tmp" "$REQ/$id.json" \
+  || { echo "could not submit request (spool missing?)" >&2; exit 3; }
+
+echo "Requested access '$profile' from the owner via Telegram — waiting up to ${WAIT_S}s…" >&2
+
+res="$RES/$id.json"
+deadline=$(( $(date +%s) + WAIT_S ))
+while [[ "$(date +%s)" -lt "$deadline" ]]; do
+  if [[ -f "$res" ]]; then
+    owner="$(stat -c %U "$res" 2>/dev/null || echo '?')"
+    case "$owner" in
+      root|llm2ssh-bot) ;;
+      *) sleep 1; continue ;;   # untrusted res — ignore
+    esac
+    dec="$(jq -r '.decision // "pending"' "$res" 2>/dev/null || echo pending)"
+    note="$(jq -r '.note // ""' "$res" 2>/dev/null || true)"
+    rm -f "$res" 2>/dev/null || true
+    case "$dec" in
+      granted) echo "✅ Access '$profile' granted${note:+ ($note)}. Re-run your command." >&2; exit 0 ;;
+      denied)  echo "❌ Owner denied access '$profile'." >&2; exit 1 ;;
+      *)       echo "Could not grant it${note:+: $note}. Ask the owner to run: $manual" >&2; exit 1 ;;
+    esac
+  fi
+  sleep 1
+done
+# Timeout: the request persists — the owner can still approve it later.
+cat >&2 <<EOF
+No response yet. Your request is still pending — the owner can approve it anytime,
+then just re-run your command. Or ask them to run:
+
+    $manual
+EOF
+exit 2
