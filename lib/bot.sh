@@ -6,6 +6,12 @@
 [[ -n "${_LLM2SSH_BOT_SOURCED:-}" ]] && return 0
 _LLM2SSH_BOT_SOURCED=1
 
+# Interactive `bot setup` and the request-decision helpers use the Telegram API
+# wrappers (tg_call, tg_send_message, …). The CLI dispatcher sources lib/* but
+# not bot/*, so pull tg-api.sh in here (it guards against double-sourcing).
+# shellcheck source=/dev/null
+[[ -r "$LLM2SSH_LIB/bot/tg-api.sh" ]] && . "$LLM2SSH_LIB/bot/tg-api.sh"
+
 BOT_CONFIG="$LLM2SSH_ETC/bot.env"
 BOT_SUDOERS="$LLM2SSH_SUDOERSD/llm2ssh-bot"
 BOT_UNIT="/etc/systemd/system/llm2ssh-bot.service"
@@ -213,8 +219,10 @@ _bot_setup() {
   local tok
   read -r -s -p "Bot token from @BotFather: " tok; echo >&2
   [[ -n "$tok" ]] || die "no token entered"
-  local me; me="$(TG_TOKEN="$tok" tg_call getMe)"
-  [[ "$(jq -r '.ok // false' <<<"$me")" == "true" ]] || die "token rejected by Telegram getMe"
+  # `|| true`: curl returns non-zero on a bad token / network error, which under
+  # `set -e` would abort silently. We want to inspect the body and report clearly.
+  local me; me="$(TG_TOKEN="$tok" tg_call getMe || true)"
+  [[ "$(jq -r '.ok // false' <<<"$me" 2>/dev/null)" == "true" ]] || die "token rejected by Telegram getMe (check the token / network)"
   local botname; botname="$(jq -r '.result.username' <<<"$me")"
   TG_TOKEN="$tok" tg_call deleteWebhook --data-urlencode 'drop_pending_updates=true' >/dev/null || true
 
@@ -225,8 +233,8 @@ _bot_setup() {
 
   local deadline=$(( $(date +%s) + 300 )) offset=0 upd chat_id user_id="" payload
   while [[ "$(date +%s)" -lt "$deadline" ]]; do
-    upd="$(TG_TOKEN="$tok" tg_call getUpdates --data-urlencode "timeout=20" --data-urlencode "offset=$offset" --data-urlencode 'allowed_updates=["message"]')"
-    [[ "$(jq -r '.ok // false' <<<"$upd")" == "true" ]] || { sleep 2; continue; }
+    upd="$(TG_TOKEN="$tok" tg_call getUpdates --data-urlencode "timeout=20" --data-urlencode "offset=$offset" --data-urlencode 'allowed_updates=["message"]' || true)"
+    [[ "$(jq -r '.ok // false' <<<"$upd" 2>/dev/null)" == "true" ]] || { sleep 2; continue; }
     local n; n="$(jq '.result | length' <<<"$upd")"
     local i
     for ((i=0; i<n; i++)); do

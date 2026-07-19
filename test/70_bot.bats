@@ -77,6 +77,15 @@ setup() {
   grep -q 'status \*' /etc/sudoers.d/llm2ssh-bot
 }
 
+@test "interactive 'bot setup' loads the Telegram API layer (regression for tg_call not found)" {
+  # The CLI must source bot/tg-api.sh so `bot setup` doesn't die with
+  # 'tg_call: command not found'. Point the API at a dead port to fail fast.
+  run bash -c "printf 'faketoken\n' | TG_API_BASE=http://127.0.0.1:9 /usr/local/bin/llm2ssh bot setup"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"tg_call"* ]]      # the function WAS defined (no 'command not found')
+  [[ "$output" == *"rejected"* ]]     # reached the getMe token check
+}
+
 @test "bot sudoers with a relay agent still validates" {
   "$L" create relayer --key "ssh-ed25519 AAAAtest a@ci" >/dev/null 2>&1 || true
   "$L" bot setup --unattended --token "111:AAA" --chat-id 4242 --agent relayer >/dev/null 2>&1
