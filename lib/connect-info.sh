@@ -9,7 +9,7 @@ _LLM2SSH_CONNECTINFO_SOURCED=1
 
 _detect_host() {
   local ip h
-  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.][0-9.]*\).*/\1/p' | head -n1)"
+  ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.][0-9.]*\).*/\1/p' | head -n1 || true)"
   h="$(hostname -f 2>/dev/null || hostname 2>/dev/null || true)"
   printf '%s' "${ip:-${h:-<server-host>}}"
 }

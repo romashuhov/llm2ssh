@@ -86,6 +86,14 @@ setup() {
   [[ "$output" == *"rejected"* ]]     # reached the getMe token check
 }
 
+@test "_bot_gen_code returns an 8-char code under set -euo pipefail (SIGPIPE regression)" {
+  # With a valid token, setup reached this code-gen; the old `urandom | head`
+  # SIGPIPE'd and aborted setup silently. Verify it survives strict mode.
+  run bash -c "set -euo pipefail; export LLM2SSH_LIB=/usr/local/lib/llm2ssh; . \$LLM2SSH_LIB/lib/common.sh; . \$LLM2SSH_LIB/lib/bot.sh; c=\$(_bot_gen_code); echo len=\${#c}"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"len=8"* ]]
+}
+
 @test "bot setup --token skips the terminal prompt (works with no stdin)" {
   # Regression: passing --token must bypass the interactive read entirely, so it
   # works where stdin/tty is unavailable (e.g. sudo on a NAS). Dead API + no stdin.

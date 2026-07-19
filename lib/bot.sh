@@ -193,6 +193,14 @@ _bot_read() {
   printf -v "$__var" '%s' "$__val"
 }
 
+# _bot_gen_code — an 8-char one-time handshake code. Uses a BOUNDED urandom read
+# and a bash substring (never `urandom | head`, which SIGPIPEs the producer and,
+# under `set -euo pipefail`, silently aborts the whole setup).
+_bot_gen_code() {
+  local c; c="$(head -c 512 /dev/urandom | LC_ALL=C tr -dc 'A-Z0-9')"
+  printf '%s' "${c:0:8}"
+}
+
 _bot_status() {
   if [[ -f "$BOT_CONFIG" ]]; then
     log "bot configured (config: $BOT_CONFIG, perms $(stat -c '%a %U:%G' "$BOT_CONFIG" 2>/dev/null))"
@@ -245,7 +253,7 @@ _bot_setup() {
   local botname; botname="$(jq -r '.result.username' <<<"$me")"
   TG_TOKEN="$tok" tg_call deleteWebhook --data-urlencode 'drop_pending_updates=true' >/dev/null || true
 
-  local code; code="$(tr -dc 'A-Z0-9' </dev/urandom | head -c 8)"
+  local code; code="$(_bot_gen_code)"
   log "Open this within 5 minutes to bind the bot to YOUR chat:"
   log "    https://t.me/${botname}?start=${code}"
   log "waiting for the /start handshake…"
