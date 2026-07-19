@@ -1,0 +1,9 @@
+[Unit]
+Description=llm2ssh TTL garbage collector (expire time-limited grants)
+Documentation=man:llm2ssh
+ConditionPathExists=/usr/local/bin/llm2ssh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/llm2ssh _gc
+Nice=10

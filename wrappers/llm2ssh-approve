@@ -1,0 +1,81 @@
+#!/bin/bash
+# llm2ssh-approve — approval spool CLIENT. Called by the PreToolUse hook and by
+# gated sudo wrappers (running as the agent). Self-contained (bash + jq).
+#
+#   printf '<request-json>' | llm2ssh-approve request --timeout 180
+#
+# Request JSON (stdin) provides at least: source, user, command. This client
+# adds id/ts/timeout_s, writes req/<id>.json, and polls res/<id>.json.
+#
+# Exit codes (CONTRACT — every caller treats non-zero paths as fail-closed):
+#   0 allow · 1 deny · 2 timeout · 3 broker unavailable
+set -euo pipefail
+
+RUN=/run/llm2ssh
+REQ="$RUN/approvals/req"
+RES="$RUN/approvals/res"
+HB="$RUN/approvald.alive"
+HB_MAX_AGE=30
+
+[[ "${1:-}" == "request" ]] || { echo "usage: llm2ssh-approve request --timeout N" >&2; exit 3; }
+shift
+timeout=180
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --timeout) timeout="${2:-180}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+command -v jq >/dev/null 2>&1 || { echo "llm2ssh-approve: jq required" >&2; exit 3; }
+
+now() { date +%s; }
+
+# A broker (bot or `llm2ssh approve --watch`) must have touched the heartbeat
+# recently, else there is nobody to answer -> fail closed immediately.
+hb_ok() {
+  [[ -f "$HB" ]] || return 1
+  local age=$(( $(now) - $(stat -c %Y "$HB" 2>/dev/null || echo 0) ))
+  [[ "$age" -le "$HB_MAX_AGE" ]]
+}
+hb_ok || { echo "llm2ssh-approve: no approval broker running (fail-closed deny)" >&2; exit 3; }
+
+[[ -d "$REQ" ]] || { echo "llm2ssh-approve: spool missing" >&2; exit 3; }
+
+in="$(cat)"
+id="$(head -c4 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+ts="$(now)"
+# A malformed request is a caller bug or an attack — NOT "broker unavailable".
+# Fail CLOSED (deny, exit 1) so a crafted request can't be conflated with exit 3
+# (which callers treat as fall-through when no broker is running).
+req="$(printf '%s' "$in" | jq -c --arg id "$id" --argjson ts "$ts" --argjson t "$timeout" \
+        '. + {id:$id, ts:$ts, timeout_s:$t}' 2>/dev/null)" \
+  || { echo "llm2ssh-approve: bad request json (deny)" >&2; exit 1; }
+
+# Group-readable (640) so the bot (group llm2ssh) can read the request; the
+# spool's setgid bit gives it group llm2ssh automatically.
+( umask 027; printf '%s' "$req" >"$REQ/.$id.tmp" ) || { echo "llm2ssh-approve: cannot write request" >&2; exit 3; }
+mv -f "$REQ/.$id.tmp" "$REQ/$id.json" || { echo "llm2ssh-approve: cannot enqueue request" >&2; exit 3; }
+
+cleanup() { rm -f "$REQ/$id.json" 2>/dev/null || true; }
+trap cleanup EXIT
+
+res="$RES/$id.json"
+deadline=$(( ts + timeout ))
+while [[ "$(now)" -lt "$deadline" ]]; do
+  if [[ -f "$res" ]]; then
+    # Only trust decisions minted by root or the bot user (agents cannot write res/).
+    owner="$(stat -c %U "$res" 2>/dev/null || echo '?')"
+    case "$owner" in
+      root|llm2ssh-bot)
+        dec="$(jq -r '.decision // "deny"' "$res" 2>/dev/null || echo deny)"
+        rm -f "$res" 2>/dev/null || true
+        [[ "$dec" == "allow" ]] && exit 0 || exit 1
+        ;;
+      *) : ;;  # untrusted res file — ignore and keep waiting
+    esac
+  fi
+  hb_ok || { echo "llm2ssh-approve: broker went away (fail-closed deny)" >&2; exit 3; }
+  sleep 0.5
+done
+echo "llm2ssh-approve: approval timed out after ${timeout}s" >&2
+exit 2

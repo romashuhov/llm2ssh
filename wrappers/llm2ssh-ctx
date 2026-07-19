@@ -1,0 +1,11 @@
+#!/bin/sh
+# llm2ssh-ctx — print the calling agent's live permission context.
+# Invoked by the agent over SSH (Mode A) or on the server (Mode B).
+u="$(id -un)"
+f="/etc/llm2ssh/context/$u.md"
+if [ -r "$f" ]; then
+  cat "$f"
+else
+  echo "llm2ssh: no context found for user '$u' (not a managed agent?)"
+  exit 1
+fi

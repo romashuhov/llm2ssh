@@ -1,0 +1,201 @@
+#!/usr/bin/env bash
+# llm2ssh-botd — the Telegram bot daemon. Runs as user llm2ssh-bot.
+# Three loops: poll (getUpdates), spool_watcher (approvals + notifications +
+# heartbeat), relay_worker (chat with the on-server agent). NOT set -e: a
+# long-running daemon must survive transient network errors.
+set -uo pipefail
+
+LLM2SSH_LIB="${LLM2SSH_LIB:-/usr/local/lib/llm2ssh}"
+export LLM2SSH_LIB
+# shellcheck source=/dev/null
+. "$LLM2SSH_LIB/lib/common.sh"
+. "$LLM2SSH_LIB/lib/state.sh"
+. "$LLM2SSH_LIB/lib/approve.sh"
+. "$LLM2SSH_LIB/bot/tg-api.sh"
+. "$LLM2SSH_LIB/lib/bot.sh"
+. "$LLM2SSH_LIB/bot/handlers.sh"
+
+# Config: systemd passes it via EnvironmentFile; support manual runs too.
+[[ -f /etc/llm2ssh/bot.env ]] && . /etc/llm2ssh/bot.env
+: "${TG_TOKEN:?bot.env missing TG_TOKEN}"
+: "${OWNER_CHAT_ID:?bot.env missing OWNER_CHAT_ID}"
+: "${OWNER_USER_ID:=$OWNER_CHAT_ID}"
+export TG_TOKEN OWNER_CHAT_ID OWNER_USER_ID
+RELAY_AGENT="${RELAY_AGENT:-}"
+APPROVAL_TIMEOUT_S="${APPROVAL_TIMEOUT_S:-60}"
+RELAY_TIMEOUT_S="${RELAY_TIMEOUT_S:-600}"
+ALLOW_UNFREEZE="${ALLOW_UNFREEZE:-true}"
+
+STATE_DIR="/var/lib/llm2ssh/bot"
+mkdir -p "$STATE_DIR" 2>/dev/null || true
+OFFSET_FILE="$STATE_DIR/offset"
+RELAY_SPOOL="$LLM2SSH_RUN/relay"
+RELAY_SESSION="$STATE_DIR/relay.session"
+
+blog() { printf '%s botd: %s\n' "$(date -u '+%FT%TZ')" "$(tg_scrub "$*")" >&2; }
+
+# ---- spool_watcher: heartbeat + approvals + notifications ------------------
+spool_watcher() {
+  approval_ensure_spool
+  declare -A notified=()
+  while true; do
+    approval_touch_hb
+    # Pending approvals -> inline keyboard (once each).
+    local id
+    while IFS= read -r id; do
+      [[ -z "$id" || -n "${notified[$id]:-}" ]] && continue
+      local user cmd
+      user="$(approval_req_field "$id" user)"; cmd="$(approval_req_field "$id" command)"
+      if approval_is_frozen "$user"; then
+        approval_write_decision "$id" deny freeze "agent frozen"; notified[$id]=1; continue
+      fi
+      local kb
+      kb="$(jq -nc --arg a "a:$id:1" --arg d "a:$id:0" \
+            '[[{text:"✅ Allow",callback_data:$a},{text:"❌ Deny",callback_data:$d}]]')"
+      tg_send_keyboard "$OWNER_CHAT_ID" "🛑 Approval needed ($user): $cmd (auto-deny in ${APPROVAL_TIMEOUT_S}s)" "$kb"
+      notified[$id]=1
+    done < <(approval_pending)
+    # Notifications.
+    local f
+    for f in "$LLM2SSH_RUN"/notify/*.json; do
+      [[ -e "$f" ]] || continue
+      local txt sev
+      sev="$(jq -r '.severity // "info"' "$f" 2>/dev/null)"
+      txt="$(jq -r '.text // ""' "$f" 2>/dev/null)"
+      [[ -n "$txt" ]] && tg_send_message "$OWNER_CHAT_ID" "🔔 [$sev] $txt"
+      rm -f "$f" 2>/dev/null || true
+    done
+    sleep 2
+  done
+}
+
+# ---- relay_worker: chat with the on-server agent --------------------------
+relay_worker() {
+  mkdir -p "$RELAY_SPOOL" 2>/dev/null || true
+  while true; do
+    local f
+    f="$(ls -1tr "$RELAY_SPOOL"/*.msg 2>/dev/null | head -n1 || true)"
+    if [[ -z "$f" ]]; then sleep 1; continue; fi
+    local prompt; prompt="$(cat "$f")"; rm -f "$f"
+    if [[ -z "$RELAY_AGENT" ]]; then
+      tg_send_message "$OWNER_CHAT_ID" "chat relay is disabled (no agent configured)"
+      continue
+    fi
+    local sid="new"
+    [[ -f "$RELAY_SESSION" ]] && sid="$(cat "$RELAY_SESSION")"
+    tg_call sendChatAction --data-urlencode "chat_id=$OWNER_CHAT_ID" --data-urlencode "action=typing" >/dev/null 2>&1 || true
+    local out
+    out="$(printf '%s' "$prompt" | sudo -n -u "$RELAY_AGENT" "$BOT_RELAY_BIN" "$sid" "$RELAY_TIMEOUT_S" 2>/dev/null || true)"
+    local result newsid
+    result="$(jq -r '.result // .error // "(no output)"' <<<"$out" 2>/dev/null || echo '(unparseable output)')"
+    newsid="$(jq -r '.session_id // empty' <<<"$out" 2>/dev/null || true)"
+    [[ -n "$newsid" ]] && printf '%s' "$newsid" >"$RELAY_SESSION"
+    if [[ "${#result}" -gt "$TG_MSG_MAX" ]]; then
+      local tmp; tmp="$(mktemp)"; printf '%s' "$result" >"$tmp"
+      tg_send_document "$OWNER_CHAT_ID" "$tmp" "agent reply (long)"; rm -f "$tmp"
+    else
+      tg_send_message "$OWNER_CHAT_ID" "$result"
+    fi
+  done
+}
+
+_relay_enqueue() {
+  mkdir -p "$RELAY_SPOOL" 2>/dev/null || true
+  printf '%s' "$1" >"$RELAY_SPOOL/$(date +%s%N).$$.msg"
+}
+
+# ---- message dispatch ------------------------------------------------------
+dispatch_message() {
+  local text="$1" word arg1 arg2
+  word="${text%% *}"; arg1=""; arg2=""
+  local rest="${text#"$word"}"; rest="${rest# }"
+  arg1="${rest%% *}"; arg2="${rest#"$arg1"}"; arg2="${arg2# }"
+  case "$word" in
+    /status) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_status)" ;;
+    /docker) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_docker)" ;;
+    /log)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_log "$arg1" "${arg2:-20}")" ;;
+    /help)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_help)" ;;
+    /freeze) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_freeze freeze "$arg1")" ;;
+    /unfreeze)
+      if [[ "$ALLOW_UNFREEZE" == "true" ]]; then tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_freeze unfreeze "$arg1")"
+      else tg_send_message "$OWNER_CHAT_ID" "unfreeze via Telegram is disabled; use SSH"; fi ;;
+    /new)    rm -f "$RELAY_SESSION"; tg_send_message "$OWNER_CHAT_ID" "🆕 new conversation" ;;
+    /start)  tg_send_message "$OWNER_CHAT_ID" "llm2ssh bot ready. /help for commands." ;;
+    *)       _relay_enqueue "$text"; tg_call sendChatAction --data-urlencode "chat_id=$OWNER_CHAT_ID" --data-urlencode "action=typing" >/dev/null 2>&1 || true ;;
+  esac
+}
+
+dispatch_callback() {
+  local cbid="$1" from="$2" chat="$3" data="$4" msgid="$5"
+  case "$data" in
+    a:*)
+      if bot_decide "$from" "$chat" "$data"; then
+        tg_answer_callback "$cbid" "recorded"
+        tg_edit_message "$chat" "$msgid" "decision recorded: ${data##*:}"
+      else
+        tg_answer_callback "$cbid" "not authorized"
+        blog "rejected callback from $from (not owner)"
+      fi ;;
+    *) tg_answer_callback "$cbid" "unknown" ;;
+  esac
+}
+
+# ---- poll loop -------------------------------------------------------------
+poll_loop() {
+  local offset=0 last_409=0
+  [[ -f "$OFFSET_FILE" ]] && offset="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
+  # Drop a leftover webhook so getUpdates works.
+  tg_call deleteWebhook --data-urlencode 'drop_pending_updates=false' >/dev/null 2>&1 || true
+  blog "polling as owner chat $OWNER_CHAT_ID"
+  while true; do
+    local upd
+    upd="$(tg_call getUpdates --data-urlencode "timeout=50" --data-urlencode "offset=$offset" \
+           --data-urlencode 'allowed_updates=["message","callback_query"]')"
+    if [[ "$(jq -r '.ok // false' <<<"$upd" 2>/dev/null)" != "true" ]]; then
+      # 409 = another instance is polling this token. Alert the owner (throttled).
+      if [[ "$(jq -r '.error_code // empty' <<<"$upd" 2>/dev/null)" == "409" ]]; then
+        local now2; now2="$(date +%s)"
+        if (( now2 - last_409 > 60 )); then
+          tg_send_message "$OWNER_CHAT_ID" "⚠️ Another poller is using this bot token (Telegram 409). Only one llm2ssh-bot may run."
+          last_409="$now2"
+        fi
+        blog "getUpdates 409 conflict"
+        sleep 10
+      else
+        sleep 3
+      fi
+      continue
+    fi
+    local n; n="$(jq '.result | length' <<<"$upd" 2>/dev/null || echo 0)"
+    local i
+    for ((i=0; i<n; i++)); do
+      offset="$(( $(jq -r ".result[$i].update_id" <<<"$upd") + 1 ))"
+      # message?
+      local mchat; mchat="$(jq -r ".result[$i].message.chat.id // empty" <<<"$upd")"
+      if [[ -n "$mchat" ]]; then
+        if [[ "$mchat" != "$OWNER_CHAT_ID" ]]; then blog "ignoring message from chat $mchat"; continue; fi
+        local text; text="$(jq -r ".result[$i].message.text // empty" <<<"$upd")"
+        [[ -n "$text" ]] && dispatch_message "$text"
+        continue
+      fi
+      # callback?
+      local cbid; cbid="$(jq -r ".result[$i].callback_query.id // empty" <<<"$upd")"
+      if [[ -n "$cbid" ]]; then
+        local from chat data msgid
+        from="$(jq -r ".result[$i].callback_query.from.id" <<<"$upd")"
+        chat="$(jq -r ".result[$i].callback_query.message.chat.id" <<<"$upd")"
+        data="$(jq -r ".result[$i].callback_query.data" <<<"$upd")"
+        msgid="$(jq -r ".result[$i].callback_query.message.message_id" <<<"$upd")"
+        dispatch_callback "$cbid" "$from" "$chat" "$data" "$msgid"
+      fi
+    done
+    printf '%s' "$offset" >"$OFFSET_FILE"
+  done
+}
+
+# ---- main ------------------------------------------------------------------
+spool_watcher &  W1=$!
+relay_worker  &  W2=$!
+# shellcheck disable=SC2064
+trap "kill $W1 $W2 2>/dev/null || true" EXIT INT TERM
+poll_loop

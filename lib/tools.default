@@ -1,0 +1,30 @@
+# Monitoring & utility packages llm2ssh installs at init so the agent has real
+# tooling available. One package per line; '#' comments and blank lines ignored.
+# Installing a binary grants NO privilege — what the agent may RUN is still
+# governed by profiles/sudoers. Override with LLM2SSH_TOOLS in /etc/llm2ssh/config
+# or skip entirely with `install.sh --no-tools`.
+
+# Process & resource monitoring
+htop
+sysstat            # iostat, mpstat, pidstat, sar
+procps             # ps, top, free, vmstat, uptime (usually preinstalled)
+lsof
+
+# Disk / storage
+ncdu
+smartmontools      # smartctl — SMART disk health (needs root to read a device)
+nvme-cli           # nvme (needs root)
+
+# Network
+iproute2           # ss, ip (usually preinstalled)
+bind9-dnsutils     # dig, nslookup, host
+
+# Hardware inventory
+lm-sensors         # sensors (temperatures/fans)
+pciutils           # lspci
+usbutils           # lsusb
+lshw
+dmidecode          # DMI/BIOS/memory info (needs root)
+
+# Convenience
+tree

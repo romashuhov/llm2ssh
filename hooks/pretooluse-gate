@@ -1,0 +1,67 @@
+#!/bin/bash
+# pretooluse-gate — Claude Code PreToolUse hook (Mode B human-in-the-loop UX).
+# Reads the tool call JSON on stdin; for commands the agent's gate-policy marks
+# as needing approval, it blocks on the approval broker and translates the answer
+# into a Claude permission decision.
+#
+# This hook is UX/soft-gate. The LOAD-BEARING enforcement is OS sudoers + the
+# gated sudo wrappers. A crashing or stripped hook must never fail OPEN, so every
+# abnormal path funnels to exit 2 (hard block).
+set -u
+trap 'echo "llm2ssh gate: internal error — command blocked" >&2; exit 2' ERR
+
+APPROVE_BIN="/usr/local/bin/llm2ssh-approve"
+user="$(id -un)"
+POLICY="/etc/llm2ssh/gate-policy/${user}.json"
+
+command -v jq >/dev/null 2>&1 || { echo "llm2ssh gate: jq missing — blocked" >&2; exit 2; }
+
+IN="$(cat)"
+CMD="$(printf '%s' "$IN" | jq -r '.tool_input.command // empty' 2>/dev/null || true)"
+# Not a shell command we gate (e.g. a non-Bash tool) -> defer to normal flow.
+[ -n "$CMD" ] || exit 0
+
+emit_allow() {
+  jq -n --arg r "$1" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"allow",permissionDecisionReason:$r}}'
+  exit 0
+}
+emit_deny() {
+  jq -n --arg r "$1" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'
+  exit 0
+}
+
+# Frozen agents: deny everything with a clear reason.
+[ -f "/run/llm2ssh/agents/${user}.frozen" ] && emit_deny "Agent is FROZEN by the owner. All actions are blocked."
+
+# No policy -> nothing for this hook to gate; defer (managed-settings still applies).
+[ -r "$POLICY" ] || exit 0
+
+default_action="$(jq -r '.default_action // "allow"' "$POLICY" 2>/dev/null || echo allow)"
+profile="$(jq -r '.profile // "?"' "$POLICY" 2>/dev/null || echo '?')"
+timeout="$(jq -r '.approval_timeout_s // 180' "$POLICY" 2>/dev/null || echo 180)"
+
+# Does the command match any ask-pattern?
+needs_approval=0
+while IFS= read -r pat; do
+  [ -z "$pat" ] && continue
+  # shellcheck disable=SC2254
+  case "$CMD" in
+    $pat) needs_approval=1; break ;;
+  esac
+done < <(jq -r '.ask[]? // empty' "$POLICY" 2>/dev/null || true)
+
+if [ "$needs_approval" -eq 0 ] && [ "$default_action" != "ask" ]; then
+  exit 0   # defer to Claude's normal permission flow
+fi
+
+# Ask the owner via the broker.
+req="$(jq -n --arg c "$CMD" --arg u "$user" --arg p "$profile" --arg cwd "${PWD:-/}" \
+      '{source:"claude-hook", user:$u, profile:$p, command:$c, cwd:$cwd}')"
+rc=0
+printf '%s' "$req" | "$APPROVE_BIN" request --timeout "$timeout" >/dev/null 2>&1 || rc=$?
+case "$rc" in
+  0) emit_allow "Owner approved via llm2ssh." ;;
+  1) emit_deny  "Owner DENIED this command via llm2ssh. Do not retry or work around it." ;;
+  2) emit_deny  "Approval timed out (owner unreachable). Command blocked; mention it and continue with other work." ;;
+  *) emit_deny  "Approval broker unavailable — failing closed." ;;
+esac

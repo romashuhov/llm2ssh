@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# relay-exec — the ONLY thing the bot's sudoers lets it run as the agent user.
+# Runs `claude -p` for the Telegram chat relay. The prompt arrives on STDIN
+# (never argv: no ps-leakage, no arg-length limit, no option injection from the
+# message text). All permission flags are intentionally ABSENT, so the on-server
+# agent's normal Mode B guardrails (managed-settings + PreToolUse hook) apply.
+#
+#   printf '<prompt>' | relay-exec <new|session-uuid> [timeout_s]
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+cd "$HOME/workspace" 2>/dev/null || cd "$HOME" || exit 1
+[ -f "$HOME/.llm2ssh/agent.env" ] && . "$HOME/.llm2ssh/agent.env"
+
+sid="${1:-new}"
+to="${2:-600}"
+[[ "$to" =~ ^[0-9]+$ ]] || to=600
+
+command -v claude >/dev/null 2>&1 || { echo '{"error":"claude not installed"}'; exit 3; }
+
+if [ "$sid" = "new" ]; then
+  sid="$(cat /proc/sys/kernel/random/uuid)"
+  exec timeout --kill-after=10 "$to" claude -p --session-id "$sid" --output-format json
+fi
+# Resuming: only trust a uuid-shaped id (it comes from our own stored state).
+[[ "$sid" =~ ^[0-9a-fA-F-]{8,}$ ]] || { echo '{"error":"bad session id"}'; exit 3; }
+exec timeout --kill-after=10 "$to" claude -p --resume "$sid" --output-format json

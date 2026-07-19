@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+# llm2ssh — provision and control least-privilege LLM-agent users on a server.
+# Single CLI dispatcher. Sources lib/*.sh and routes to cmd_<subcommand>.
+set -euo pipefail
+
+# Resolve the library dir. Env override lets tests run from a repo checkout.
+_self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -z "${LLM2SSH_LIB:-}" ]]; then
+  if [[ -d "/usr/local/lib/llm2ssh/lib" ]]; then
+    LLM2SSH_LIB="/usr/local/lib/llm2ssh"
+  else
+    # repo checkout: bin/.. is the repo root, libs live in ./lib
+    LLM2SSH_LIB="$(cd "$_self/.." && pwd)"
+  fi
+fi
+export LLM2SSH_LIB
+
+# shellcheck source=lib/common.sh
+. "$LLM2SSH_LIB/lib/common.sh"
+# shellcheck source=lib/state.sh
+. "$LLM2SSH_LIB/lib/state.sh"
+
+# Source every other lib module that exists (milestones add files here).
+for _m in "$LLM2SSH_LIB"/lib/*.sh; do
+  case "$(basename "$_m")" in
+    common.sh|state.sh) continue ;;
+  esac
+  # shellcheck disable=SC1090
+  [[ -r "$_m" ]] && . "$_m"
+done
+unset _m
+# Source agent providers (Claude Code, and future ones).
+for _m in "$LLM2SSH_LIB"/lib/agents/*.sh; do
+  # shellcheck disable=SC1090
+  [[ -r "$_m" ]] && . "$_m"
+done
+unset _m
+
+# --- Global flag parsing ----------------------------------------------------
+# Extract flags that apply everywhere (--yes) from the arg stream; leave the
+# rest for the subcommand. --json is consumed by subcommands individually.
+LLM2SSH_ASSUME_YES=0
+_args=()
+for _a in "$@"; do
+  case "$_a" in
+    --yes|-y) LLM2SSH_ASSUME_YES=1 ;;
+    *) _args+=("$_a") ;;
+  esac
+done
+set -- ${_args[@]+"${_args[@]}"}
+export LLM2SSH_ASSUME_YES
+
+cmd_version() { printf 'llm2ssh %s\n' "$LLM2SSH_VERSION"; }
+
+cmd_help() {
+  cat <<'EOF'
+llm2ssh — least-privilege SSH access for LLM agents (Ubuntu/Debian)
+
+USAGE
+  llm2ssh <command> [args]
+
+AGENTS & PERMISSIONS
+  create <agent> [--profile P] [--key K | --key-file F | --github USER]
+  list [--json]                       list managed agents
+  status [<agent>] [--json]           show agent state, profile, TTL, sessions
+  profiles                            list available permission profiles
+  profile show <profile>              preview what a profile grants
+  grant <agent> <profile> [--ttl 4h] [--services a,b] [--kill-on-expiry] [--yes]
+  revoke <agent>                      drop back to the agent's base profile
+  freeze <agent>|--all [--reason ..]  kill-switch: revoke all + kill sessions
+  unfreeze <agent>                    restore a frozen agent
+  delete <agent> [--keep-home] [--yes]
+
+KEYS & ACCESS
+  key add|list|remove <agent> ...     manage SSH public keys
+  connect-info <agent> [--github U | --add-key K | --rotate-key] [--json]
+  log <agent> [--since 1h] [--follow] [--sudo-only] [--denied] [--json]
+
+ON-SERVER AGENT (Mode B)
+  agent install|auth|start|attach|say|tail|status|stop <agent>
+  approve --watch                     local TTY approver for gated commands
+
+TELEGRAM
+  bot setup|rotate|rebind
+
+MAINTENANCE
+  tools install|list                  install/list monitoring & utility tools
+  doctor                              self-check the installation
+  uninstall [--purge-logs] [--yes]
+  version | help
+
+Global flags: --yes (assume yes), --json (machine-readable, where supported).
+EOF
+}
+
+# dispatch NAME ARGS...
+# Call cmd_<name> if a lib module defined it; otherwise report the milestone.
+dispatch() {
+  local name="$1"; shift
+  local fn="cmd_${name//-/_}"
+  if declare -F "$fn" >/dev/null 2>&1; then
+    "$fn" "$@"
+  else
+    err "'$name' is recognized but not yet implemented in this build"
+    return "$EX_ERR"
+  fi
+}
+
+main() {
+  local sub="${1:-help}"
+  [[ $# -gt 0 ]] && shift || true
+  case "$sub" in
+    version|--version|-V) cmd_version ;;
+    help|--help|-h)       cmd_help ;;
+    # read-only, no privilege needed (world-readable profile files / dpkg query)
+    profiles|profile|tools) dispatch "$sub" "$@" ;;
+    # read-only but reads root-only state/logs
+    list|status|log)      require_root; dispatch "$sub" "$@" ;;
+    doctor)               require_root; dispatch doctor "$@" ;;
+    # long-running / interactive: root, but must NOT hold the global lock
+    approve|agent)        require_root; dispatch "$sub" "$@" ;;
+    # mutating commands: root + global lock (short, serialized against gc)
+    create|grant|revoke|freeze|unfreeze|delete|key|bot|connect-info|_gc)
+      require_root
+      with_lock dispatch "$sub" "$@"
+      ;;
+    *)
+      err "unknown command: '$sub' (try: llm2ssh help)"
+      exit "$EX_USAGE"
+      ;;
+  esac
+}
+
+main "$@"

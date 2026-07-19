@@ -1,0 +1,14 @@
+[Unit]
+Description=llm2ssh TTL garbage collector timer
+Documentation=man:llm2ssh
+
+[Timer]
+# Persistent state is the source of truth; the timer merely enforces it, so a
+# reboot can never silently make a time-limited grant permanent.
+OnBootSec=30s
+OnUnitActiveSec=1min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

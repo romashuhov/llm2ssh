@@ -1,0 +1,72 @@
+#!/bin/bash
+# llm2ssh-svc — root-owned systemctl wrapper for the `services` profile.
+# THE SECURITY BOUNDARY for that profile: it is the only thing sudoers lets the
+# agent run as root, so it must never trust its arguments. Review every line.
+#
+# Contract:  llm2ssh-svc <verb> <unit>
+#   verb ∈ {start,stop,restart,reload,try-restart}
+#   unit must match ^[A-Za-z0-9_.@-]+$ AND be in the agent's allowlist
+#         /var/lib/llm2ssh/agents/<SUDO_USER>/services.allow
+# Dangerous verbs additionally require owner approval via the broker, if one is
+# running (fail-open to allow ONLY when no broker exists, so servers without a
+# bot/approver still work; the OS allowlist remains the hard limit).
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+unset IFS CDPATH
+
+APPROVE_BIN="/usr/local/bin/llm2ssh-approve"
+ALLOW_BASE="/var/lib/llm2ssh/agents"
+# Every state-changing verb goes through approval when a broker is reachable
+# (start/stop/restart/reload/try-restart — the full allowed set).
+DANGEROUS_VERBS=" start stop restart reload try-restart "
+
+verb="${1:-}"; unit="${2:-}"
+[[ $# -eq 2 ]] || { echo "usage: llm2ssh-svc <verb> <unit>" >&2; exit 2; }
+
+case "$verb" in
+  start|stop|restart|reload|try-restart) ;;
+  *) echo "llm2ssh-svc: verb '$verb' not allowed" >&2; exit 3 ;;
+esac
+
+# Strict unit-name charset (blocks path traversal, flags, shell metacharacters).
+[[ "$unit" =~ ^[A-Za-z0-9_.@-]+$ ]] || { echo "llm2ssh-svc: bad unit name" >&2; exit 3; }
+
+# SUDO_USER is trustworthy here: this binary only ever runs under sudo.
+agent="${SUDO_USER:-}"
+[[ -n "$agent" ]] || { echo "llm2ssh-svc: no SUDO_USER" >&2; exit 3; }
+allow="$ALLOW_BASE/$agent/services.allow"
+[[ -r "$allow" ]] || { echo "llm2ssh-svc: no allowlist for $agent" >&2; exit 4; }
+
+# Match either exact name or name without a trailing .service.
+if ! grep -Fxq -- "$unit" "$allow" && ! grep -Fxq -- "${unit%.service}" "$allow"; then
+  echo "llm2ssh-svc: unit '$unit' not in allowlist for $agent" >&2
+  logger -t llm2ssh -p auth.warning "DENIED svc $verb $unit by $agent (not in allowlist)" 2>/dev/null || true
+  exit 4
+fi
+
+# Human-in-the-loop for state-changing verbs, if a broker is reachable.
+if [[ "$DANGEROUS_VERBS" == *" $verb "* && -x "$APPROVE_BIN" ]]; then
+  # Build the request with jq so agent-controlled values (e.g. $PWD, which may
+  # contain a double-quote) can NEVER produce malformed JSON. If jq is missing we
+  # cannot ask, so we fail CLOSED rather than silently skipping approval.
+  command -v jq >/dev/null 2>&1 || { echo "llm2ssh-svc: jq missing; refusing" >&2; exit 3; }
+  req=$(jq -nc --arg u "$agent" --arg cmd "systemctl $verb $unit" --arg cwd "${PWD:-/}" \
+        '{source:"sudo-wrapper", user:$u, profile:"services", command:$cmd, cwd:$cwd, timeout_s:180}')
+  set +e
+  printf '%s' "$req" | "$APPROVE_BIN" request --timeout 180 >/dev/null 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0) : ;;  # approved
+    1) echo "llm2ssh-svc: owner DENIED '$verb $unit'" >&2; exit 3 ;;
+    2) echo "llm2ssh-svc: approval timed out for '$verb $unit'" >&2; exit 3 ;;
+    3) : ;;  # NO BROKER running -> fall through (OS allowlist is the hard gate).
+             # NB: this path is reachable ONLY when no heartbeat exists; the
+             # client fails CLOSED (deny) on malformed input, so the agent cannot
+             # forge "no broker" while an approver/bot is live.
+    *) echo "llm2ssh-svc: approval error ($rc)" >&2; exit 3 ;;
+  esac
+fi
+
+logger -t llm2ssh -p auth.info "svc $verb $unit by $agent" 2>/dev/null || true
+exec systemctl --no-ask-password "$verb" -- "$unit"

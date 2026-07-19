@@ -1,0 +1,27 @@
+[Unit]
+Description=llm2ssh Telegram bot
+Documentation=man:llm2ssh
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/llm2ssh/bot.env
+
+[Service]
+User=llm2ssh-bot
+Group=llm2ssh
+EnvironmentFile=/etc/llm2ssh/bot.env
+ExecStart=/usr/local/lib/llm2ssh/bot/llm2ssh-botd
+Restart=always
+RestartSec=5
+# The bot needs sudo (SUID), so NoNewPrivileges MUST stay 'no'. Do not "fix" this.
+NoNewPrivileges=no
+ProtectSystem=strict
+ReadWritePaths=/run/llm2ssh /var/lib/llm2ssh/bot
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+StateDirectory=llm2ssh/bot
+LogsDirectory=llm2ssh
+
+[Install]
+WantedBy=multi-user.target

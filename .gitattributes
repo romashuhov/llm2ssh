@@ -1,0 +1,4 @@
+# llm2ssh ships shell scripts that run on Linux servers — they MUST keep LF line
+# endings regardless of the platform they're edited on. A stray CRLF breaks the
+# shebang ("bad interpreter: /usr/bin/env bash^M").
+* text=auto eol=lf
