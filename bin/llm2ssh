@@ -83,7 +83,8 @@ ON-SERVER AGENT (Mode B)
   approve --watch                     local TTY approver for gated commands
 
 TELEGRAM
-  bot setup|rotate|rebind
+  bot setup [--token T] [--agent A] | rotate | rebind
+                                      (--token avoids the terminal prompt)
 
 MAINTENANCE
   update                              git pull the latest + reinstall (+ restart bot)

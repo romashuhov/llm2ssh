@@ -226,12 +226,18 @@ _bot_setup() {
     return 0
   fi
 
-  # Interactive setup (needs network for the Telegram API).
+  # Semi-interactive setup: --token skips the terminal prompt entirely (useful
+  # where stdin/`/dev/tty` isn't a real terminal, e.g. under sudo on some NAS
+  # boxes), while the owner chat is still captured automatically via the /start
+  # handshake below.
   have_cmd jq || die "jq required"
   have_cmd curl || die "curl required for interactive setup"
-  local tok
-  _bot_read tok "Bot token from @BotFather: " --secret
-  [[ -n "$tok" ]] || die "no token entered (need a terminal; or use: llm2ssh bot setup --unattended --token '<token>' --chat-id '<id>')"
+  local tok="$token"
+  if [[ -z "$tok" ]]; then
+    _bot_read tok "Bot token from @BotFather: " --secret
+    [[ -n "$tok" ]] || die "no token entered. Pass it as an argument instead:
+  sudo llm2ssh bot setup --token '<token from @BotFather>'"
+  fi
   # `|| true`: curl returns non-zero on a bad token / network error, which under
   # `set -e` would abort silently. We want to inspect the body and report clearly.
   local me; me="$(TG_TOKEN="$tok" tg_call getMe || true)"
@@ -266,7 +272,9 @@ _bot_setup() {
   done
   [[ -n "$user_id" ]] || die "handshake timed out; re-run 'llm2ssh bot setup'"
 
-  _bot_read agent "Relay chat to which on-server agent (blank to disable relay): "
+  # Optional relay agent: use --agent if given, else prompt (only meaningful on a
+  # real terminal; otherwise it stays empty = relay disabled, set later if wanted).
+  [[ -n "$agent" ]] || _bot_read agent "Relay chat to which on-server agent (blank to disable relay): "
   bot_write_config "$tok" "$chat_id" "$user_id" "$agent" "$admin"
   bot_install_sudoers "$agent" "$admin_flag"
   bot_install_service

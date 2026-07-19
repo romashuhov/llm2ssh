@@ -86,6 +86,15 @@ setup() {
   [[ "$output" == *"rejected"* ]]     # reached the getMe token check
 }
 
+@test "bot setup --token skips the terminal prompt (works with no stdin)" {
+  # Regression: passing --token must bypass the interactive read entirely, so it
+  # works where stdin/tty is unavailable (e.g. sudo on a NAS). Dead API + no stdin.
+  run bash -c "TG_API_BASE=http://127.0.0.1:9 /usr/local/bin/llm2ssh bot setup --token '111:FAKE' </dev/null"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"rejected"* ]]     # reached getMe (did NOT block on read)
+  [[ "$output" != *"no token"* ]]     # did NOT fall into the empty-token path
+}
+
 @test "bot sudoers with a relay agent still validates" {
   "$L" create relayer --key "ssh-ed25519 AAAAtest a@ci" >/dev/null 2>&1 || true
   "$L" bot setup --unattended --token "111:AAA" --chat-id 4242 --agent relayer >/dev/null 2>&1
