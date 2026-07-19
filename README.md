@@ -28,6 +28,18 @@ start. Skip them with `--no-tools`; manage later with `llm2ssh tools`.
 
 ## Quick start
 
+**Fastest path — `onboard`:** one command creates the agent, generates a key on
+the server, and prints a single block you paste straight into your agent's chat.
+The agent sets up its key and starts working — no key wrangling on your side.
+
+```bash
+sudo llm2ssh onboard bot            # → paste the printed block into the agent's chat
+```
+
+The key it prints grants only the current profile (observer = read-only) and is
+revocable instantly (`llm2ssh freeze bot`). Prefer not to move a private key at
+all? Use the bring-your-own-key flow instead:
+
 ```bash
 # 1. Create an agent user, starting read-only, with your SSH key
 sudo llm2ssh create bot --github your-handle          # or --key "ssh-ed25519 ..."

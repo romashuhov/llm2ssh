@@ -86,7 +86,7 @@ _apt_install() {
   DEBIAN_FRONTEND=noninteractive apt-get update -qq || _die "apt-get update failed"
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "${missing[@]}" || _die "apt-get install failed"
 }
-_apt_install sudo curl jq tmux
+_apt_install sudo curl jq tmux openssh-client
 if [[ "$WITH_AUDITD" -eq 1 ]]; then
   _apt_install auditd || _log "auditd install failed; non-sudo command audit will be DISABLED"
 fi

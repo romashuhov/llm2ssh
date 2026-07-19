@@ -60,6 +60,8 @@ USAGE
   llm2ssh <command> [args]
 
 AGENTS & PERMISSIONS
+  onboard <agent> [--profile P] [--replace]   one-shot: create + generate a key
+                                              + print a paste-into-chat bootstrap
   create <agent> [--profile P] [--key K | --key-file F | --github USER]
   list [--json]                       list managed agents
   status [<agent>] [--json]           show agent state, profile, TTL, sessions
@@ -120,7 +122,7 @@ main() {
     # long-running / interactive: root, but must NOT hold the global lock
     approve|agent)        require_root; dispatch "$sub" "$@" ;;
     # mutating commands: root + global lock (short, serialized against gc)
-    create|grant|revoke|freeze|unfreeze|delete|key|bot|connect-info|_gc)
+    create|onboard|grant|revoke|freeze|unfreeze|delete|key|bot|connect-info|_gc)
       require_root
       with_lock dispatch "$sub" "$@"
       ;;
