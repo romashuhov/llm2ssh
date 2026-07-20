@@ -79,7 +79,7 @@ rm -f /etc/tmpfiles.d/llm2ssh.conf
 rm -rf /run/llm2ssh
 
 # Config/state.
-rm -rf /etc/llm2ssh /var/lib/llm2ssh
+rm -rf /etc/llm2ssh /var/lib/llm2ssh /var/lib/llm2ssh-bot
 
 if [[ "$PURGE_LOGS" -eq 1 ]]; then
   _log "purging logs"

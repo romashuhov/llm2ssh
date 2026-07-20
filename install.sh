@@ -196,8 +196,9 @@ for hb in approvald.alive botd.alive; do
   [[ -e "/run/llm2ssh/$hb" ]] || : >"/run/llm2ssh/$hb"
   chown llm2ssh-bot:llm2ssh "/run/llm2ssh/$hb" && chmod 0644 "/run/llm2ssh/$hb"
 done
-# Bot state dir (offset, relay session) — bot-owned under the 0700 root var dir.
-install -d -o llm2ssh-bot -g llm2ssh -m 0750 /var/lib/llm2ssh/bot
+# Bot state dir (offset, relay session) — a SIBLING of the 0700-root
+# /var/lib/llm2ssh (which the bot user can't traverse), owned by the bot.
+install -d -o llm2ssh-bot -g llm2ssh -m 0750 /var/lib/llm2ssh-bot
 
 # ---- sshd hardening drop-in (only if sshd is installed) --------------------
 if command -v sshd >/dev/null && [[ -f "$SRC/templates/sshd-match.conf" ]]; then

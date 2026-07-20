@@ -28,7 +28,9 @@ RELAY_TIMEOUT_S="${RELAY_TIMEOUT_S:-600}"
 ALLOW_UNFREEZE="${ALLOW_UNFREEZE:-true}"
 BOT_ADMIN="${BOT_ADMIN:-false}"
 
-STATE_DIR="/var/lib/llm2ssh/bot"
+# Bot state lives OUTSIDE the 0700-root /var/lib/llm2ssh (which the bot user can't
+# even traverse) — a sibling dir the bot owns.
+STATE_DIR="/var/lib/llm2ssh-bot"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 OFFSET_FILE="$STATE_DIR/offset"
 RELAY_SPOOL="$LLM2SSH_RUN/relay"
