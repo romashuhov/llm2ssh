@@ -137,6 +137,36 @@ setup() {
   ! bot_msg_authorized 4242 4242          # no bound owner -> denied
 }
 
+@test "hardware handlers (/disk /mem /cpu /hw) produce output" {
+  run bash -c '
+    export LLM2SSH_LIB=/usr/local/lib/llm2ssh
+    . /usr/local/lib/llm2ssh/lib/common.sh
+    . /usr/local/lib/llm2ssh/bot/handlers.sh
+    case "$(bot_cmd_disk)" in *disk*) ;; *) echo "disk FAIL"; exit 1;; esac
+    case "$(bot_cmd_mem)"  in *memory*) ;; *) echo "mem FAIL";  exit 2;; esac
+    case "$(bot_cmd_cpu)"  in *load*) ;; *) echo "cpu FAIL";  exit 3;; esac
+    case "$(bot_cmd_hw)"   in *cpu:*) ;; *) echo "hw FAIL";   exit 4;; esac
+    echo OK'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *OK* ]]
+}
+
+@test "/agents panel shows agent uid, profile and session state" {
+  "$L" create panelagent --key "ssh-ed25519 AAAAtest a@ci" >/dev/null 2>&1 || true
+  "$L" grant panelagent docker-ro >/dev/null 2>&1 || true
+  run bash -c '
+    export LLM2SSH_LIB=/usr/local/lib/llm2ssh
+    . /usr/local/lib/llm2ssh/lib/common.sh
+    . /usr/local/lib/llm2ssh/bot/handlers.sh
+    bot_cmd_agents'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"panelagent"* ]]
+  [[ "$output" == *"docker-ro"* ]]
+  [[ "$output" == *"uid"* ]]
+  [[ "$output" == *"idle"* || "$output" == *"session"* ]]
+  "$L" delete panelagent --yes >/dev/null 2>&1 || true
+}
+
 @test "bot service unit is installed and marks NoNewPrivileges=no" {
   [ -f /etc/systemd/system/llm2ssh-bot.service ]
   grep -q 'NoNewPrivileges=no' /etc/systemd/system/llm2ssh-bot.service

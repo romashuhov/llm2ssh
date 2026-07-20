@@ -185,6 +185,14 @@ dispatch_message() {
   local -a a=(); read -ra a <<<"$rest"
   case "$word" in
     /status) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_status)" ;;
+    /agents) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_agents)" ;;
+    /agent)  tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_agent "${a[0]:-}")" ;;
+    /disk)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_disk)" ;;
+    /mem)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_mem)" ;;
+    /cpu)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_cpu)" ;;
+    /temp|/sensors) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_temp)" ;;
+    /top)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_top)" ;;
+    /hw)     tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_hw)" ;;
     /docker) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_docker)" ;;
     /log)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_log "${a[0]:-}" "${a[1]:-20}")" ;;
     /help)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_help "$BOT_ADMIN")" ;;
@@ -195,13 +203,12 @@ dispatch_message() {
     /new)    rm -f "$RELAY_SESSION"; tg_send_message "$OWNER_CHAT_ID" "🆕 new conversation" ;;
     /start)  tg_send_message "$OWNER_CHAT_ID" "llm2ssh bot ready. /help for commands." ;;
     # ---- admin commands (gated by BOT_ADMIN; wrapper still refuses full/delete) ----
-    /agents|/onboard|/grant|/revoke|/profiles|/tools)
+    /onboard|/grant|/revoke|/profiles|/tools)
       if [[ "$BOT_ADMIN" != "true" ]]; then
         tg_send_message "$OWNER_CHAT_ID" "admin commands are disabled on this bot."
         return
       fi
       case "$word" in
-        /agents)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_agents)" ;;
         /profiles) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_profiles)" ;;
         /grant)    tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_grant "${a[0]:-}" "${a[1]:-}" "${a[2]:-}")" ;;
         /revoke)   tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_revoke "${a[0]:-}")" ;;
