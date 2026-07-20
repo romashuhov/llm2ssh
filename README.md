@@ -126,13 +126,15 @@ Every shell script passes `shellcheck -S warning`; the test suite runs under
 ## Updating
 
 ```bash
-sudo llm2ssh update        # git pull the latest + reinstall + restart the bot
+sudo llm2ssh update        # git pull the latest + reinstall
 # or, from a clone:
 ./update.sh                # same thing (git pull + sudo ./install.sh)
 ```
 
 `install.sh` is upgrade-safe — it only replaces code under `/usr/local`, never
-your agents, keys, profiles, or logs.
+your agents, keys, profiles, or logs. It also refreshes the systemd units and
+**restarts a running Telegram bot** so it picks up new code (a stopped bot is
+left alone), so no manual `systemctl restart` is needed after an update.
 
 ## Development
 

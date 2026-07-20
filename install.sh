@@ -231,6 +231,12 @@ if [[ -d "$PREFIX_LIB/systemd" ]] && command -v systemctl >/dev/null; then
   if [[ -f /etc/systemd/system/llm2ssh-gc.timer ]]; then
     systemctl enable --now llm2ssh-gc.timer >/dev/null 2>&1 || _log "gc timer enable deferred"
   fi
+  # Refresh a RUNNING bot so it picks up the new code/unit. try-restart only acts
+  # on an already-active service (never resurrects a deliberately-stopped one),
+  # and bot startup is side-effect-free (just re-reads config + code).
+  if systemctl is-active --quiet llm2ssh-bot 2>/dev/null; then
+    systemctl try-restart llm2ssh-bot >/dev/null 2>&1 && _log "restarted llm2ssh-bot" || _log "llm2ssh-bot restart warned"
+  fi
 fi
 
 # ---- Monitoring / utility tools -------------------------------------------

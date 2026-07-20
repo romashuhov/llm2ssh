@@ -28,13 +28,8 @@ cmd_update() {
   [[ "$before" == "$after" ]] && log "no new commits — reinstalling to be safe"
 
   log "re-running installer"
+  # install.sh refreshes code + units, reloads systemd, and try-restarts a running
+  # bot itself — so nothing extra to do here.
   bash "$src/install.sh" "$@" || die "installer failed"
-
-  # Restart the bot so it picks up new code (the gc timer and sshd drop-in are
-  # handled by install.sh itself).
-  if have_cmd systemctl && systemctl is-active llm2ssh-bot >/dev/null 2>&1; then
-    log "restarting llm2ssh-bot"
-    systemctl restart llm2ssh-bot || warn "could not restart llm2ssh-bot (check: journalctl -u llm2ssh-bot)"
-  fi
   log "updated — now at version $(cat "$LLM2SSH_LIB/VERSION" 2>/dev/null || echo '?')"
 }
