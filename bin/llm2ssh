@@ -83,8 +83,9 @@ ON-SERVER AGENT (Mode B)
   approve --watch                     local TTY approver for gated commands
 
 TELEGRAM
-  bot setup [--token T] [--agent A] | rotate | rebind
-                                      (--token avoids the terminal prompt)
+  bot setup [--token T] [--user @nick] [--agent A] | rotate | rebind
+                                      (--token skips the prompt; --user binds to
+                                       the first message from that Telegram user)
 
 MAINTENANCE
   update                              git pull the latest + reinstall (+ restart bot)

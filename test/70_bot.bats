@@ -103,6 +103,12 @@ setup() {
   [[ "$output" != *"no token"* ]]     # did NOT fall into the empty-token path
 }
 
+@test "bot setup accepts --user and still validates the token first" {
+  run bash -c "TG_API_BASE=http://127.0.0.1:9 /usr/local/bin/llm2ssh bot setup --token '111:FAKE' --user '@someone' </dev/null"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"rejected"* ]]     # parsed --user, reached getMe (didn't choke on the flag)
+}
+
 @test "bot sudoers with a relay agent still validates" {
   "$L" create relayer --key "ssh-ed25519 AAAAtest a@ci" >/dev/null 2>&1 || true
   "$L" bot setup --unattended --token "111:AAA" --chat-id 4242 --agent relayer >/dev/null 2>&1

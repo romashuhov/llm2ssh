@@ -211,18 +211,20 @@ _bot_status() {
 }
 
 _bot_setup() {
-  local unattended=0 token="" chat="" user="" agent="" admin="true"
+  local unattended=0 token="" chat="" user="" agent="" admin="true" expect_user=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --unattended) unattended=1; shift ;;
       --token) token="${2:?}"; shift 2 ;;
       --chat-id) chat="${2:?}"; shift 2 ;;
       --user-id) user="${2:?}"; shift 2 ;;
+      --user) expect_user="${2:?}"; shift 2 ;;   # @nick or numeric id to bind to
       --agent) agent="${2:?}"; shift 2 ;;
       --no-admin) admin="false"; shift ;;
       *) die_usage "unknown flag for bot setup: $1" ;;
     esac
   done
+  expect_user="${expect_user#@}"   # accept @nick or nick
   local admin_flag=0; [[ "$admin" == "true" ]] && admin_flag=1
   if [[ "$unattended" -eq 1 ]]; then
     [[ -n "$token" && -n "$chat" ]] || die_usage "unattended setup needs --token and --chat-id"
@@ -256,29 +258,49 @@ _bot_setup() {
   local code; code="$(_bot_gen_code)"
   log "Open this within 5 minutes to bind the bot to YOUR chat:"
   log "    https://t.me/${botname}?start=${code}"
-  log "waiting for the /start handshake…"
+  if [[ -n "$expect_user" ]]; then
+    log "waiting for the FIRST message from '$expect_user' in a private chat with the bot…"
+  else
+    log "waiting for /start in your private chat with the bot (press Start, or send /start)…"
+  fi
 
-  local deadline=$(( $(date +%s) + 300 )) offset=0 upd chat_id user_id="" payload
+  local deadline=$(( $(date +%s) + 300 )) offset=0 upd chat_id user_id=""
   while [[ "$(date +%s)" -lt "$deadline" ]]; do
     upd="$(TG_TOKEN="$tok" tg_call getUpdates --data-urlencode "timeout=20" --data-urlencode "offset=$offset" --data-urlencode 'allowed_updates=["message"]' || true)"
-    [[ "$(jq -r '.ok // false' <<<"$upd" 2>/dev/null)" == "true" ]] || { sleep 2; continue; }
+    if [[ "$(jq -r '.ok // false' <<<"$upd" 2>/dev/null)" != "true" ]]; then
+      # Surface a Telegram-side error (e.g. 409: another poller/the service is
+      # already consuming updates) instead of hanging silently.
+      local errd; errd="$(jq -r '.description // empty' <<<"$upd" 2>/dev/null)"
+      [[ -n "$errd" ]] && log "…telegram: $errd"
+      sleep 2; continue
+    fi
     local n; n="$(jq '.result | length' <<<"$upd")"
     local i
     for ((i=0; i<n; i++)); do
       offset="$(( $(jq -r ".result[$i].update_id" <<<"$upd") + 1 ))"
-      payload="$(jq -r ".result[$i].message.text // empty" <<<"$upd")"
-      if [[ "$payload" == "/start $code" ]]; then
-        # Refuse to bind to a group/channel: there, other members could command
-        # the bot. Require a 1:1 private chat.
-        local ctype; ctype="$(jq -r ".result[$i].message.chat.type" <<<"$upd")"
-        [[ "$ctype" == "private" ]] || die "the bot must be bound in a PRIVATE 1:1 chat, not a '$ctype'. Message the bot directly (not in a group) and re-run setup."
-        chat_id="$(jq -r ".result[$i].message.chat.id" <<<"$upd")"
-        user_id="$(jq -r ".result[$i].message.from.id" <<<"$upd")"
-        break 2
+      local mtype mtext mfromname mfromid mchatid
+      mtype="$(jq -r ".result[$i].message.chat.type // empty" <<<"$upd")"
+      mtext="$(jq -r ".result[$i].message.text // empty" <<<"$upd")"
+      mfromname="$(jq -r ".result[$i].message.from.username // empty" <<<"$upd")"
+      mfromid="$(jq -r ".result[$i].message.from.id // empty" <<<"$upd")"
+      mchatid="$(jq -r ".result[$i].message.chat.id // empty" <<<"$upd")"
+      [[ -z "$mchatid" ]] && continue
+      log "…received '${mtext:-<non-text>}' from ${mfromname:+@}${mfromname:-?} (id $mfromid, $mtype)"
+      # A group/channel would let other members command the bot — private only.
+      [[ "$mtype" == "private" ]] || { log "   ignored: not a private 1:1 chat"; continue; }
+      local matched=0
+      if [[ -n "$expect_user" ]]; then
+        [[ "${mfromname,,}" == "${expect_user,,}" || "$mfromid" == "$expect_user" ]] && matched=1
+      else
+        # Accept the deep-link code OR a bare /start (deep links to an already-
+        # started bot often drop the payload — the common "after /start nothing").
+        [[ "$mtext" == "/start $code" || "$mtext" == "/start" ]] && matched=1
       fi
+      if [[ "$matched" -eq 1 ]]; then chat_id="$mchatid"; user_id="$mfromid"; break 2; fi
     done
   done
-  [[ -n "$user_id" ]] || die "handshake timed out; re-run 'llm2ssh bot setup'"
+  [[ -n "$user_id" ]] || die "handshake timed out. Re-run, or bind directly:
+  llm2ssh bot setup --unattended --token '<token>' --chat-id '<your chat id>'"
 
   # Optional relay agent: use --agent if given, else prompt (only meaningful on a
   # real terminal; otherwise it stays empty = relay disabled, set later if wanted).
