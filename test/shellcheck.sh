@@ -10,7 +10,7 @@ mapfile -t files < <(
     lib/*.sh lib/agents/*.sh \
     wrappers/llm2ssh-svc wrappers/llm2ssh-approve wrappers/llm2ssh-ctx wrappers/llm2ssh-bot-admin wrappers/llm2ssh-request wrappers/llm2ssh-du \
     hooks/pretooluse-gate \
-    bot/llm2ssh-botd bot/relay-exec bot/tg-api.sh bot/handlers.sh
+    bot/llm2ssh-botd bot/relay-exec bot/tg-api.sh bot/handlers.sh bot/menus.sh
 )
 
 exec shellcheck -S warning -x "${files[@]}"

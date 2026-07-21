@@ -87,6 +87,8 @@ TELEGRAM
                                       (--token skips the prompt; --user binds to
                                        the first message from that Telegram user)
 
+  instructions                        print the paste-into-your-agent playbook
+
 MAINTENANCE
   update                              git pull the latest + reinstall (+ restart bot)
   tools install|list                  install/list monitoring & utility tools
@@ -118,7 +120,7 @@ main() {
     version|--version|-V) cmd_version ;;
     help|--help|-h)       cmd_help ;;
     # read-only, no privilege needed (world-readable profile files / dpkg query)
-    profiles|profile|tools) dispatch "$sub" "$@" ;;
+    profiles|profile|tools|instructions) dispatch "$sub" "$@" ;;
     # read-only but reads root-only state/logs
     list|status|log)      require_root; dispatch "$sub" "$@" ;;
     doctor)               require_root; dispatch doctor "$@" ;;

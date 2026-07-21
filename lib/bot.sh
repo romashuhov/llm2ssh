@@ -64,15 +64,18 @@ bot_install_sudoers() {
 }
 
 # ---- config ----------------------------------------------------------------
-# bot_write_config TOKEN CHAT_ID USER_ID [RELAY_AGENT] [ADMIN]
+# bot_write_config TOKEN CHAT_ID USER_ID [RELAY_AGENT] [ADMIN] [PAIR_USER]
+# CHAT_ID/USER_ID may be empty — the daemon then PAIRS with the first (matching)
+# message and persists the owner to its own state dir.
 bot_write_config() {
-  local token="$1" chat="$2" user="$3" agent="${4:-}" admin="${5:-true}"
+  local token="$1" chat="$2" user="$3" agent="${4:-}" admin="${5:-true}" pair="${6:-}"
   ensure_dir "$LLM2SSH_ETC" 0755 "root:root"
   {
     printf '# llm2ssh bot config — the token is a credential. Keep 0640 root:%s.\n' "$LLM2SSH_BOT_USER"
     printf 'TG_TOKEN=%q\n' "$token"
     printf 'OWNER_CHAT_ID=%q\n' "$chat"
     printf 'OWNER_USER_ID=%q\n' "$user"
+    printf 'PAIR_USER=%q\n' "$pair"
     printf 'RELAY_AGENT=%q\n' "$agent"
     printf 'APPROVAL_TIMEOUT_S=%q\n' "60"
     printf 'RELAY_TIMEOUT_S=%q\n' "600"
@@ -82,6 +85,9 @@ bot_write_config() {
     printf 'BOT_ADMIN=%q\n' "$admin"
   } | atomic_write "$BOT_CONFIG" 0640 "root:$LLM2SSH_BOT_USER"
 }
+
+# bot_clear_owner — forget the paired owner so the bot re-pairs (llm2ssh bot rebind).
+bot_clear_owner() { rm -f /var/lib/llm2ssh-bot/owner 2>/dev/null || true; }
 
 # ---- systemd unit ----------------------------------------------------------
 bot_install_service() {
@@ -202,12 +208,14 @@ _bot_gen_code() {
 }
 
 _bot_status() {
-  if [[ -f "$BOT_CONFIG" ]]; then
-    log "bot configured (config: $BOT_CONFIG, perms $(stat -c '%a %U:%G' "$BOT_CONFIG" 2>/dev/null))"
-    have_cmd systemctl && systemctl is-active llm2ssh-bot >/dev/null 2>&1 && log "service: active" || log "service: not active"
-  else
-    log "bot not configured (run: llm2ssh bot setup)"
-  fi
+  if [[ ! -f "$BOT_CONFIG" ]]; then log "bot not configured (run: llm2ssh bot setup --token '<token>')"; return 0; fi
+  log "bot configured (config: $BOT_CONFIG, perms $(stat -c '%a %U:%G' "$BOT_CONFIG" 2>/dev/null))"
+  local owner=""
+  [[ -r /var/lib/llm2ssh-bot/owner ]] && owner="$(sed -n 's/^OWNER_CHAT_ID=//p' /var/lib/llm2ssh-bot/owner)"
+  # bot.env may pin an owner directly (unattended --chat-id).
+  [[ -z "$owner" ]] && owner="$(sed -n 's/^OWNER_CHAT_ID=//p' "$BOT_CONFIG" | tr -d \"\')"
+  if [[ -n "$owner" ]]; then log "owner: bound to chat $owner"; else log "owner: NOT bound yet — send the bot a message to pair"; fi
+  have_cmd systemctl && systemctl is-active llm2ssh-bot >/dev/null 2>&1 && log "service: active" || log "service: not active"
 }
 
 _bot_setup() {
@@ -236,12 +244,12 @@ _bot_setup() {
     return 0
   fi
 
-  # Semi-interactive setup: --token skips the terminal prompt entirely (useful
-  # where stdin/`/dev/tty` isn't a real terminal, e.g. under sudo on some NAS
-  # boxes), while the owner chat is still captured automatically via the /start
-  # handshake below.
+  # One-command pairing setup. Validate the token, start the service in pairing
+  # mode, and return immediately — the daemon binds to your first message. No
+  # terminal prompt, no handshake wait, nothing to press in the terminal.
+  # --token avoids even the token prompt (needed where stdin isn't a TTY).
   have_cmd jq || die "jq required"
-  have_cmd curl || die "curl required for interactive setup"
+  have_cmd curl || die "curl required for setup"
   local tok="$token"
   if [[ -z "$tok" ]]; then
     _bot_read tok "Bot token from @BotFather: " --secret
@@ -252,80 +260,37 @@ _bot_setup() {
   # `set -e` would abort silently. We want to inspect the body and report clearly.
   local me; me="$(TG_TOKEN="$tok" tg_call getMe || true)"
   [[ "$(jq -r '.ok // false' <<<"$me" 2>/dev/null)" == "true" ]] || die "token rejected by Telegram getMe (check the token / network)"
-  local botname; botname="$(jq -r '.result.username' <<<"$me")"
+  local botname; botname="$(jq -r '.result.username // "your_bot"' <<<"$me")"
   TG_TOKEN="$tok" tg_call deleteWebhook --data-urlencode 'drop_pending_updates=true' >/dev/null || true
 
-  local code; code="$(_bot_gen_code)"
-  log "Open this within 5 minutes to bind the bot to YOUR chat:"
-  log "    https://t.me/${botname}?start=${code}"
-  if [[ -n "$expect_user" ]]; then
-    log "waiting for the FIRST message from '$expect_user' in a private chat with the bot…"
-  else
-    log "waiting for /start in your private chat with the bot (press Start, or send /start)…"
-  fi
-
-  local deadline=$(( $(date +%s) + 300 )) offset=0 upd chat_id user_id=""
-  while [[ "$(date +%s)" -lt "$deadline" ]]; do
-    upd="$(TG_TOKEN="$tok" tg_call getUpdates --data-urlencode "timeout=20" --data-urlencode "offset=$offset" --data-urlencode 'allowed_updates=["message"]' || true)"
-    if [[ "$(jq -r '.ok // false' <<<"$upd" 2>/dev/null)" != "true" ]]; then
-      # Surface a Telegram-side error (e.g. 409: another poller/the service is
-      # already consuming updates) instead of hanging silently.
-      local errd; errd="$(jq -r '.description // empty' <<<"$upd" 2>/dev/null)"
-      [[ -n "$errd" ]] && log "…telegram: $errd"
-      sleep 2; continue
-    fi
-    local n; n="$(jq '.result | length' <<<"$upd")"
-    local i
-    for ((i=0; i<n; i++)); do
-      offset="$(( $(jq -r ".result[$i].update_id" <<<"$upd") + 1 ))"
-      local mtype mtext mfromname mfromid mchatid
-      mtype="$(jq -r ".result[$i].message.chat.type // empty" <<<"$upd")"
-      mtext="$(jq -r ".result[$i].message.text // empty" <<<"$upd")"
-      mfromname="$(jq -r ".result[$i].message.from.username // empty" <<<"$upd")"
-      mfromid="$(jq -r ".result[$i].message.from.id // empty" <<<"$upd")"
-      mchatid="$(jq -r ".result[$i].message.chat.id // empty" <<<"$upd")"
-      [[ -z "$mchatid" ]] && continue
-      log "…received '${mtext:-<non-text>}' from ${mfromname:+@}${mfromname:-?} (id $mfromid, $mtype)"
-      # A group/channel would let other members command the bot — private only.
-      [[ "$mtype" == "private" ]] || { log "   ignored: not a private 1:1 chat"; continue; }
-      local matched=0
-      if [[ -n "$expect_user" ]]; then
-        [[ "${mfromname,,}" == "${expect_user,,}" || "$mfromid" == "$expect_user" ]] && matched=1
-      else
-        # Accept the deep-link code OR a bare /start (deep links to an already-
-        # started bot often drop the payload — the common "after /start nothing").
-        [[ "$mtext" == "/start $code" || "$mtext" == "/start" ]] && matched=1
-      fi
-      if [[ "$matched" -eq 1 ]]; then chat_id="$mchatid"; user_id="$mfromid"; break 2; fi
-    done
-  done
-  [[ -n "$user_id" ]] || die "handshake timed out. Re-run, or bind directly:
-  llm2ssh bot setup --unattended --token '<token>' --chat-id '<your chat id>'"
-
-  # Optional relay agent: use --agent if given, else prompt (only meaningful on a
-  # real terminal; otherwise it stays empty = relay disabled, set later if wanted).
-  [[ -n "$agent" ]] || _bot_read agent "Relay chat to which on-server agent (blank to disable relay): "
-  bot_write_config "$tok" "$chat_id" "$user_id" "$agent" "$admin"
+  bot_clear_owner                       # fresh pairing (drop any previous binding)
+  bot_write_config "$tok" "" "" "$agent" "$admin" "$expect_user"
   bot_install_sudoers "$agent" "$admin_flag"
   bot_install_service
-  TG_TOKEN="$tok" tg_call sendMessage --data-urlencode "chat_id=$chat_id" \
-    --data-urlencode "text=✓ Bound. This bot now answers only you." >/dev/null || true
-  log "bot bound to chat $chat_id and started"
+
+  log "✓ bot @${botname} is running${expect_user:+ (will bind only to @$expect_user)}."
+  log "  Open it and press Start (or send any message) — that's it:"
+  log "      https://t.me/${botname}"
+  log "  The first message binds the bot to you; nothing else to run."
 }
 
 _bot_rotate() {
   [[ -f "$BOT_CONFIG" ]] || die "bot not configured"
   # shellcheck disable=SC1090
   . "$BOT_CONFIG"
-  local tok; _bot_read tok "New bot token: " --secret
+  local tok="${1:-}"; [[ "$tok" == "--token" ]] && tok="${2:-}"
+  [[ -n "$tok" ]] || _bot_read tok "New bot token: " --secret
   [[ -n "$tok" ]] || die "no token entered"
-  bot_write_config "$tok" "$OWNER_CHAT_ID" "$OWNER_USER_ID" "${RELAY_AGENT:-}"
+  # Keep the existing binding (owner lives in the bot's state dir, not bot.env).
+  bot_write_config "$tok" "" "" "${RELAY_AGENT:-}" "${BOT_ADMIN:-true}" "${PAIR_USER:-}"
   have_cmd systemctl && systemctl restart llm2ssh-bot 2>/dev/null || true
   log "token rotated (revoke the old one in @BotFather)"
 }
 
 _bot_rebind() {
   [[ -f "$BOT_CONFIG" ]] || die "bot not configured"
-  # Re-run the interactive setup (re-enter token + redo the /start handshake).
-  _bot_setup "$@"
+  # Forget the current owner and re-enter pairing — just message the bot again.
+  bot_clear_owner
+  have_cmd systemctl && systemctl restart llm2ssh-bot 2>/dev/null || true
+  log "unbound — open the bot and send any message to re-pair."
 }

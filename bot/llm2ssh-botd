@@ -15,24 +15,32 @@ export LLM2SSH_LIB
 . "$LLM2SSH_LIB/bot/tg-api.sh"
 . "$LLM2SSH_LIB/lib/bot.sh"
 . "$LLM2SSH_LIB/bot/handlers.sh"
+. "$LLM2SSH_LIB/bot/menus.sh"
 
 # Config: systemd passes it via EnvironmentFile; support manual runs too.
 [[ -f /etc/llm2ssh/bot.env ]] && . /etc/llm2ssh/bot.env
 : "${TG_TOKEN:?bot.env missing TG_TOKEN}"
-: "${OWNER_CHAT_ID:?bot.env missing OWNER_CHAT_ID}"
-: "${OWNER_USER_ID:=$OWNER_CHAT_ID}"
-export TG_TOKEN OWNER_CHAT_ID OWNER_USER_ID
 RELAY_AGENT="${RELAY_AGENT:-}"
 APPROVAL_TIMEOUT_S="${APPROVAL_TIMEOUT_S:-60}"
 RELAY_TIMEOUT_S="${RELAY_TIMEOUT_S:-600}"
 ALLOW_UNFREEZE="${ALLOW_UNFREEZE:-true}"
 BOT_ADMIN="${BOT_ADMIN:-false}"
+PAIR_USER="${PAIR_USER:-}"           # optional: only pair with this @username / id
 
 # Bot state lives OUTSIDE the 0700-root /var/lib/llm2ssh (which the bot user can't
 # even traverse) — a sibling dir the bot owns.
 STATE_DIR="/var/lib/llm2ssh-bot"
 mkdir -p "$STATE_DIR" 2>/dev/null || true
 OFFSET_FILE="$STATE_DIR/offset"
+# The bound owner. bot.env may set it (--unattended --chat-id); otherwise it is
+# learned by pairing and persisted here (bot.env is root-owned, not bot-writable).
+OWNER_FILE="$STATE_DIR/owner"
+OWNER_CHAT_ID="${OWNER_CHAT_ID:-}"
+# shellcheck disable=SC1090
+if [[ -z "$OWNER_CHAT_ID" && -r "$OWNER_FILE" ]]; then . "$OWNER_FILE"; fi
+OWNER_CHAT_ID="${OWNER_CHAT_ID:-}"
+OWNER_USER_ID="${OWNER_USER_ID:-$OWNER_CHAT_ID}"
+export TG_TOKEN OWNER_CHAT_ID OWNER_USER_ID
 RELAY_SPOOL="$LLM2SSH_RUN/relay"
 RELAY_SESSION="$STATE_DIR/relay.session"
 
@@ -180,6 +188,25 @@ _bot_onboard() {
   rm -f "$f"
 }
 
+# _bot_try_pair MTYPE MCHAT MFROM MFROMNAME — bind to this sender if eligible.
+# Updates the OWNER_* globals and persists them so the binding survives restarts.
+_bot_try_pair() {
+  local mtype="$1" mchat="$2" mfrom="$3" mfromname="$4"
+  [[ "$mtype" == "private" ]] || { blog "pairing: ignoring non-private chat $mchat"; return; }
+  if [[ -n "$PAIR_USER" ]]; then
+    local want="${PAIR_USER#@}"
+    if [[ "${mfromname,,}" != "${want,,}" && "$mfrom" != "$want" ]]; then
+      blog "pairing: sender @$mfromname/$mfrom != PAIR_USER '$PAIR_USER' — ignoring"
+      return
+    fi
+  fi
+  OWNER_CHAT_ID="$mchat"; OWNER_USER_ID="$mfrom"
+  { printf 'OWNER_CHAT_ID=%s\nOWNER_USER_ID=%s\n' "$OWNER_CHAT_ID" "$OWNER_USER_ID" >"$OWNER_FILE"; } \
+    2>/dev/null || blog "pairing: could not persist $OWNER_FILE"
+  blog "paired to chat $OWNER_CHAT_ID user $OWNER_USER_ID"
+  bot_send_menu "$OWNER_CHAT_ID" "✅ Paired — this bot now answers only you."
+}
+
 # ---- message dispatch ------------------------------------------------------
 dispatch_message() {
   local text="$1" word rest
@@ -203,7 +230,8 @@ dispatch_message() {
       if [[ "$ALLOW_UNFREEZE" == "true" ]]; then tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_freeze unfreeze "${a[0]:-}")"
       else tg_send_message "$OWNER_CHAT_ID" "unfreeze via Telegram is disabled; use SSH"; fi ;;
     /new)    rm -f "$RELAY_SESSION"; tg_send_message "$OWNER_CHAT_ID" "🆕 new conversation" ;;
-    /start)  tg_send_message "$OWNER_CHAT_ID" "llm2ssh bot ready. /help for commands." ;;
+    /start|/menu) bot_send_menu "$OWNER_CHAT_ID" ;;
+    /instructions) tg_send_message "$OWNER_CHAT_ID" "$("$L2" instructions 2>/dev/null || echo 'unavailable')" ;;
     # ---- admin commands (gated by BOT_ADMIN; wrapper still refuses full/delete) ----
     /onboard|/grant|/revoke|/profiles|/tools)
       if [[ "$BOT_ADMIN" != "true" ]]; then
@@ -241,6 +269,13 @@ dispatch_callback() {
         tg_answer_callback "$cbid" "not authorized"
         blog "rejected access callback from $from (not owner)"
       fi ;;
+    m:*|hw:*|ag:*|af:*|au:*|av:*|ag2:*|agp:*|agt:*)
+      # Menu navigation — owner-gate here (unlike a:/g: which self-gate).
+      if [[ "$from" != "$OWNER_USER_ID" || "$chat" != "$OWNER_CHAT_ID" ]]; then
+        tg_answer_callback "$cbid" "not authorized"; blog "rejected menu callback from $from"; return
+      fi
+      tg_answer_callback "$cbid" ""
+      bot_menu_callback "$data" "$chat" "$msgid" ;;
     *) tg_answer_callback "$cbid" "unknown" ;;
   esac
 }
@@ -251,7 +286,8 @@ poll_loop() {
   [[ -f "$OFFSET_FILE" ]] && offset="$(cat "$OFFSET_FILE" 2>/dev/null || echo 0)"
   # Drop a leftover webhook so getUpdates works.
   tg_call deleteWebhook --data-urlencode 'drop_pending_updates=false' >/dev/null 2>&1 || true
-  blog "polling as owner chat $OWNER_CHAT_ID"
+  if [[ -n "$OWNER_CHAT_ID" ]]; then blog "polling as owner chat $OWNER_CHAT_ID"
+  else blog "polling in PAIRING mode — waiting for the first ${PAIR_USER:+message from $PAIR_USER }message to bind"; fi
   while true; do
     local upd
     upd="$(tg_call getUpdates --data-urlencode "timeout=50" --data-urlencode "offset=$offset" \
@@ -276,10 +312,19 @@ poll_loop() {
     for ((i=0; i<n; i++)); do
       offset="$(( $(jq -r ".result[$i].update_id" <<<"$upd") + 1 ))"
       # message?
-      local mchat mfrom
+      local mchat mfrom mtype mfromname
       mchat="$(jq -r ".result[$i].message.chat.id // empty" <<<"$upd")"
       mfrom="$(jq -r ".result[$i].message.from.id // empty" <<<"$upd")"
       if [[ -n "$mchat" ]]; then
+        # PAIRING: no owner yet -> bind to the first private message (optionally
+        # only from PAIR_USER). This makes setup a single command: run it, then
+        # just message the bot once.
+        if [[ -z "$OWNER_CHAT_ID" ]]; then
+          mtype="$(jq -r ".result[$i].message.chat.type // empty" <<<"$upd")"
+          mfromname="$(jq -r ".result[$i].message.from.username // empty" <<<"$upd")"
+          _bot_try_pair "$mtype" "$mchat" "$mfrom" "$mfromname"
+          continue
+        fi
         # Gate on BOTH chat.id and from.id — same as the callback path. Without
         # the from.id check, a bot bound to a group would obey ANY member.
         if ! bot_msg_authorized "$mfrom" "$mchat"; then blog "ignoring message from chat $mchat user $mfrom"; continue; fi

@@ -124,6 +124,17 @@ tg_edit_message() {
     --data-urlencode "text=$text" >/dev/null
 }
 
+# tg_edit_keyboard CHAT MSGID TEXT KEYBOARD_JSON — replace a message's text AND
+# its inline keyboard in place (menu navigation).
+tg_edit_keyboard() {
+  local chat="$1" msgid="$2" text="$3" kb="$4"
+  tg_call editMessageText \
+    --data-urlencode "chat_id=$chat" --data-urlencode "message_id=$msgid" \
+    --data-urlencode "text=$text" \
+    --data-urlencode "reply_markup=$(jq -nc --argjson k "$kb" '{inline_keyboard:$k}')" \
+    >/dev/null
+}
+
 tg_answer_callback() {
   local cbid="$1" text="${2:-}"
   tg_call answerCallbackQuery --data-urlencode "callback_query_id=$cbid" \

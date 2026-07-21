@@ -19,6 +19,7 @@ bot_cmd_help() {
   local admin="${1:-false}"
   cat <<'EOF'
 llm2ssh bot commands:
+/menu            — buttons for everything (recommended)
 /status          — server + agent overview
 /agents          — agents: user, permissions, sessions
 /agent <name>    — one agent in detail
@@ -26,6 +27,7 @@ hardware:
 /disk /mem /cpu /temp /top /hw
 /docker          — running containers
 /log <agent> [n] — recent audit lines
+/instructions    — the agent playbook (to paste into your agent)
 /freeze <agent>  — kill-switch (revoke + sever sessions)
 /unfreeze <agent>
 /new             — reset the chat-relay conversation
