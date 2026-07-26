@@ -7,15 +7,28 @@
 [[ -n "${_LLM2SSH_MENUS_SOURCED:-}" ]] && return 0
 _LLM2SSH_MENUS_SOURCED=1
 
-_menu_title() { printf '🤖 llm2ssh — %s' "$(hostname)"; }
+_menu_title() { printf '🤖 llm2ssh — server: %s' "$(_cur_server)"; }
 
 # ---- keyboard builders (inline_keyboard JSON arrays) -----------------------
 _kb_main() {
-  jq -nc '[
+  jq -nc --arg srv "🔀 Server: $(_cur_server)" '[
+    [{text:$srv,callback_data:"m:srv"}],
     [{text:"👥 Agents",callback_data:"m:agents"},{text:"🖥 Hardware",callback_data:"m:hw"}],
     [{text:"🐳 Docker",callback_data:"m:docker"},{text:"📊 Status",callback_data:"m:status"}],
     [{text:"📋 Agent instructions",callback_data:"m:instr"},{text:"❓ Help",callback_data:"m:help"}]
   ]'
+}
+
+# server picker: one button per registered server (local first) + back
+_kb_servers() {
+  local buttons='[]' name cur; cur="$(_cur_server)"
+  while IFS= read -r name; do
+    [[ -z "$name" ]] && continue
+    [[ ${#name} -gt 30 ]] && continue
+    local label="$name"; [[ "$name" == "$cur" ]] && label="✓ $name"
+    buttons="$(jq -c --arg t "$label" --arg cd "sv:$name" '. + [[{text:$t,callback_data:$cd}]]' <<<"$buttons")"
+  done < <("$L2" servers list 2>/dev/null | awk '{print $1}')
+  jq -c '. + [[{text:"« Menu",callback_data:"m:home"}]]' <<<"$buttons"
 }
 _kb_hw() {
   jq -nc '[
@@ -115,6 +128,9 @@ bot_menu_callback() {
   local data="$1" chat="$2" msgid="$3" a rest p
   case "$data" in
     m:home)   tg_edit_keyboard "$chat" "$msgid" "$(_menu_title)"$'\n'"Tap to navigate:" "$(_kb_main)" ;;
+    m:srv)    tg_edit_keyboard "$chat" "$msgid" "🔀 Pick a server (current: $(_cur_server)):" "$(_kb_servers)" ;;
+    sv:*)     a="${data#sv:}"; [[ "$a" =~ ^[a-zA-Z0-9._-]{1,32}$ ]] && _set_server "$a"
+              tg_edit_keyboard "$chat" "$msgid" "$(_menu_title)"$'\n'"Now operating on: $(_cur_server)" "$(_kb_main)" ;;
     m:hw)     tg_edit_keyboard "$chat" "$msgid" "🖥 Hardware — pick a readout:" "$(_kb_hw)" ;;
     m:agents) tg_edit_keyboard "$chat" "$msgid" "👥 Agents — tap one:" "$(_kb_agents)" ;;
     m:docker) tg_edit_keyboard "$chat" "$msgid" "$(bot_cmd_docker)" "$(_kb_back m:home '« Menu')" ;;

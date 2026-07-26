@@ -1,0 +1,57 @@
+#!/bin/bash
+# llm2ssh-hub — run a SAFE llm2ssh subcommand on a registered server (local or
+# over SSH). The Telegram bot's sudoers lets it run ONLY this wrapper. Read/
+# control verbs go via `llm2ssh`; mutating admin verbs go via `llm2ssh-bot-admin`
+# (which hard-refuses full/delete) — so even across the hub you cannot grant root
+# or delete an agent on any node. Review every line.
+#
+#   llm2ssh-hub <server> <verb> [args...]
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin; unset IFS CDPATH
+
+LLM2SSH_LIB="${LLM2SSH_LIB:-/usr/local/lib/llm2ssh}"
+# shellcheck source=/dev/null
+. "$LLM2SSH_LIB/lib/common.sh"
+# shellcheck source=/dev/null
+. "$LLM2SSH_LIB/lib/servers.sh"
+
+die2() { echo "llm2ssh-hub: $*" >&2; exit 3; }
+
+server="${1:-local}"; shift || true
+verb="${1:-}"; shift || true
+[[ "$server" =~ ^[a-zA-Z0-9._-]{1,32}$ ]] || die2 "bad server name"
+[[ -n "$verb" ]] || die2 "no verb"
+
+# Verb allowlist + which remote binary it runs through.
+kind=""
+case "$verb" in
+  status|list|log|hwstat|version|freeze|unfreeze) kind="read" ;;
+  onboard|grant|revoke|tools)                     kind="admin" ;;
+  *) die2 "verb '$verb' not allowed via the hub" ;;
+esac
+
+# Admin verbs are gated by BOT_ADMIN in bot.env (enforced HERE, so it also covers
+# remote nodes and isn't only a daemon-level check).
+if [[ "$kind" == "admin" ]]; then
+  admin_ok="$(sed -n 's/^BOT_ADMIN=//p' /etc/llm2ssh/bot.env 2>/dev/null | tr -d "\"'")"
+  [[ "$admin_ok" == "true" ]] || die2 "admin verbs are disabled on this bot (re-run 'bot setup' without --no-admin)"
+fi
+
+target="$(servers_target "$server")" || die2 "unknown server: $server"
+admin_bin="$LLM2SSH_LIB/bin/llm2ssh-bot-admin"
+
+if [[ "$target" == "local" ]]; then
+  if [[ "$kind" == "admin" ]]; then exec "$admin_bin" "$verb" "$@"; else exec /usr/local/bin/llm2ssh "$verb" "$@"; fi
+fi
+
+# Remote: reject shell metacharacters in args, then build a properly-quoted
+# remote command so nothing is re-interpreted by the node's login shell.
+for a in "$@"; do
+  [[ "$a" == *[\;\&\|\`\$\(\)\<\>$'\n']* ]] && die2 "argument not allowed over ssh: $a"
+done
+remote_bin="/usr/local/bin/llm2ssh"; [[ "$kind" == "admin" ]] && remote_bin="/usr/local/lib/llm2ssh/bin/llm2ssh-bot-admin"
+rcmd="sudo -n $remote_bin $(printf '%q' "$verb")"
+for a in "$@"; do rcmd+=" $(printf '%q' "$a")"; done
+exec ssh -i "$LLM2SSH_HUB_KEY" -o BatchMode=yes -o ConnectTimeout=10 \
+     -o UserKnownHostsFile="$LLM2SSH_HUB_KNOWN" -o StrictHostKeyChecking=accept-new \
+     -- "$target" "$rcmd"

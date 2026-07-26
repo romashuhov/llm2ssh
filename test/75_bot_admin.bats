@@ -72,12 +72,19 @@ EOF
   "$L" delete obot --yes
 }
 
-@test "bot sudoers includes the admin wrapper (and --no-admin drops it)" {
+@test "hub wrapper is whitelisted; admin verbs gated by BOT_ADMIN (no full ever)" {
+  HUB=/usr/local/lib/llm2ssh/bin/llm2ssh-hub
   "$L" bot setup --unattended --token "1:AAA" --chat-id 7 >/dev/null 2>&1
   visudo -cf /etc/sudoers.d/llm2ssh-bot
-  grep -q 'llm2ssh-bot-admin' /etc/sudoers.d/llm2ssh-bot
+  grep -q 'llm2ssh-hub' /etc/sudoers.d/llm2ssh-bot         # the bot's single action path
   grep -q '^BOT_ADMIN=' /etc/llm2ssh/bot.env
+  # admin ON: an admin verb reaches the admin wrapper, which still refuses full
+  run "$HUB" local grant radmin full
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not allowed"* ]]
+  # admin OFF: the hub wrapper refuses admin verbs outright
   "$L" bot setup --unattended --token "1:AAA" --chat-id 7 --no-admin >/dev/null 2>&1
-  visudo -cf /etc/sudoers.d/llm2ssh-bot
-  ! grep -q 'llm2ssh-bot-admin' /etc/sudoers.d/llm2ssh-bot
+  run "$HUB" local grant radmin docker-ro
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"disabled"* ]]
 }

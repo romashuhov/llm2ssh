@@ -88,6 +88,13 @@ TELEGRAM
                                        the first message from that Telegram user)
 
   instructions                        print the paste-into-your-agent playbook
+  hwstat [disk|mem|cpu|temp|top|hw]   hardware readouts (used by the bot)
+
+MULTI-SERVER (one bot / hub for many boxes)
+  servers add <name> <ssh-target>     register a node reachable over SSH
+  servers list | remove <name> | test <name>
+  hub keygen | key                    (on the HUB) make/print the hub SSH key
+  hub-authorize '<pubkey>'            (on a NODE) trust the hub, create llm2ssh-hub
 
 MAINTENANCE
   update                              git pull the latest + reinstall (+ restart bot)
@@ -120,7 +127,11 @@ main() {
     version|--version|-V) cmd_version ;;
     help|--help|-h)       cmd_help ;;
     # read-only, no privilege needed (world-readable profile files / dpkg query)
-    profiles|profile|tools|instructions) dispatch "$sub" "$@" ;;
+    profiles|profile|tools|instructions|hwstat) dispatch "$sub" "$@" ;;
+    # multi-server: servers (add/remove self-check root), hub keygen/authorize (root)
+    servers)              dispatch servers "$@" ;;
+    hub)                  require_root; dispatch hub "$@" ;;
+    hub-authorize)        require_root; cmd_hub_authorize "$@" ;;
     # read-only but reads root-only state/logs
     list|status|log)      require_root; dispatch "$sub" "$@" ;;
     doctor)               require_root; dispatch doctor "$@" ;;

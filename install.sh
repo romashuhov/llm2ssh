@@ -129,6 +129,7 @@ fi
 install -d -m 0755 "$PREFIX_LIB/bin"
 [[ -f "$SRC/wrappers/llm2ssh-svc" ]]       && install -m 0755 "$SRC/wrappers/llm2ssh-svc"       "$PREFIX_LIB/bin/llm2ssh-svc"
 [[ -f "$SRC/wrappers/llm2ssh-bot-admin" ]] && install -m 0755 "$SRC/wrappers/llm2ssh-bot-admin" "$PREFIX_LIB/bin/llm2ssh-bot-admin"
+[[ -f "$SRC/wrappers/llm2ssh-hub" ]]       && install -m 0755 "$SRC/wrappers/llm2ssh-hub"       "$PREFIX_LIB/bin/llm2ssh-hub"
 [[ -f "$SRC/wrappers/llm2ssh-du" ]]        && install -m 0755 "$SRC/wrappers/llm2ssh-du"        "$PREFIX_LIB/bin/llm2ssh-du"
 [[ -f "$SRC/bot/relay-exec" ]]             && install -m 0755 "$SRC/bot/relay-exec"             "$PREFIX_LIB/bin/relay-exec"
 

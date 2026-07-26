@@ -53,7 +53,7 @@ teardown() {
     . /usr/local/lib/llm2ssh/lib/common.sh
     . /usr/local/lib/llm2ssh/bot/handlers.sh
     . /usr/local/lib/llm2ssh/bot/menus.sh
-    _kb_main | jq -e "type==\"array\" and (.[0][0].callback_data==\"m:agents\")" >/dev/null || exit 1
+    _kb_main | jq -e "type==\"array\" and (.[0][0].callback_data==\"m:srv\") and ([.[][].callback_data]|index(\"m:agents\"))" >/dev/null || exit 1
     _kb_hw   | jq -e ".[0][0].callback_data==\"hw:disk\"" >/dev/null || exit 2
     _kb_duration a1 docker-ro | jq -e ".[0][0].callback_data==\"agt:a1:docker-ro:1h\"" >/dev/null || exit 3
     echo OK'

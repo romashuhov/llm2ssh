@@ -17,6 +17,7 @@ BOT_SUDOERS="$LLM2SSH_SUDOERSD/llm2ssh-bot"
 BOT_UNIT="/etc/systemd/system/llm2ssh-bot.service"
 BOT_RELAY_BIN="/usr/local/lib/llm2ssh/bin/relay-exec"
 BOT_ADMIN_BIN="/usr/local/lib/llm2ssh/bin/llm2ssh-bot-admin"
+BOT_HUB_BIN="/usr/local/lib/llm2ssh/bin/llm2ssh-hub"
 # Access-request spool + the bot's own heartbeat (the request client checks this
 # specifically, so a running local TTY approver isn't mistaken for the bot).
 REQUEST_REQ="$LLM2SSH_RUN/requests/req"
@@ -40,12 +41,16 @@ Cmnd_Alias LLM2SSH_BOT_CTL = /usr/local/bin/llm2ssh freeze *, /usr/local/bin/llm
 Cmnd_Alias LLM2SSH_BOT_DOCKER = $dbin ps --format json, $dbin ps -a --format json, \\
     $dbin ps --format json --no-trunc
 $LLM2SSH_BOT_USER ALL=(root) NOPASSWD: LLM2SSH_BOT_RO, LLM2SSH_BOT_CTL, LLM2SSH_BOT_DOCKER
+# The multi-server fan-out wrapper (local or over SSH). It classifies the verb;
+# mutating verbs are gated by BOT_ADMIN and hard-capped (no full/delete), so this
+# wildcard is safe. It is the bot's single path to per-server actions.
+$LLM2SSH_BOT_USER ALL=(root) NOPASSWD: $BOT_HUB_BIN *
+# hwstat (hardware readouts) locally — the hub wrapper execs it for server=local.
+$LLM2SSH_BOT_USER ALL=(root) NOPASSWD: /usr/local/bin/llm2ssh hwstat, /usr/local/bin/llm2ssh hwstat *
 EOF
-  if [[ "$admin" == "1" ]]; then
-    # The admin wrapper is the boundary; the wildcard is safe because the wrapper
-    # validates every verb/arg and refuses full/delete.
-    printf '%s ALL=(root) NOPASSWD: %s *\n' "$LLM2SSH_BOT_USER" "$BOT_ADMIN_BIN"
-  fi
+  # admin param retained for compatibility; the admin gate now lives in the hub
+  # wrapper (it reads BOT_ADMIN from bot.env), so it applies to remote nodes too.
+  : "${admin:-0}"
   if [[ -n "$agent" ]]; then
     printf '%s ALL=(%s) NOPASSWD: %s *\n' "$LLM2SSH_BOT_USER" "$agent" "$BOT_RELAY_BIN"
   fi

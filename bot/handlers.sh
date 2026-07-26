@@ -7,13 +7,20 @@
 _LLM2SSH_BOTHANDLERS_SOURCED=1
 
 L2="/usr/local/bin/llm2ssh"
-L2ADMIN="/usr/local/lib/llm2ssh/bin/llm2ssh-bot-admin"
+L2HUB="/usr/local/lib/llm2ssh/bin/llm2ssh-hub"
+CUR_SERVER_FILE="/var/lib/llm2ssh-bot/current_server"
 
 _h() { printf '%s\n' "$*"; }
 
-# _admin VERB ARGS... — run an admin action through the root-owned wrapper (which
-# hard-refuses full/delete). Echoes combined output for the reply.
-_admin() { sudo -n "$L2ADMIN" "$@" 2>&1; }
+# Which server the bot currently operates on (default: this host).
+_cur_server() { cat "$CUR_SERVER_FILE" 2>/dev/null || echo local; }
+_set_server() { printf '%s' "$1" >"$CUR_SERVER_FILE" 2>/dev/null || true; }
+
+# _l2 VERB ARGS... — run an llm2ssh subcommand on the CURRENT server (local or a
+# remote node) through the root-owned hub wrapper. The wrapper routes admin verbs
+# to llm2ssh-bot-admin (no full/delete) — so multi-server keeps the same limits.
+_l2()      { sudo -n "$L2HUB" "$(_cur_server)" "$@"; }        # clean stdout (for JSON)
+_admin()   { sudo -n "$L2HUB" "$(_cur_server)" "$@" 2>&1; }   # combined (for display)
 
 bot_cmd_help() {
   local admin="${1:-false}"
@@ -69,40 +76,45 @@ _agent_sessions() {
 }
 
 bot_cmd_agents() {
-  local arr; arr="$(sudo -n "$L2" status --json 2>/dev/null || echo '[]')"
+  local srv; srv="$(_cur_server)"
+  local arr; arr="$(_l2 status --json 2>/dev/null || echo '[]')"
   local n; n="$(jq 'length' <<<"$arr" 2>/dev/null || echo 0)"
-  [[ "$n" -gt 0 ]] || { _h "👥 no managed agents. Add one with /onboard <name>."; return; }
-  _h "👥 agents ($n):"
+  [[ "$n" -gt 0 ]] || { _h "👥 [$srv] no managed agents. Add one with /onboard <name>."; return; }
+  _h "👥 [$srv] agents ($n):"
   local i
   for ((i=0; i<n; i++)); do
-    local a prof frozen rem uid ttl
+    local a prof frozen rem ttl extra=""
     a="$(jq -r ".[$i].agent" <<<"$arr")"
     prof="$(jq -r ".[$i].current_profile // \"?\"" <<<"$arr")"
     frozen="$(jq -r ".[$i].frozen // false" <<<"$arr")"
     rem="$(jq -r ".[$i].remaining_s // 0" <<<"$arr")"
-    uid="$(id -u "$a" 2>/dev/null || echo '?')"
     ttl=""; [[ "$rem" =~ ^[0-9]+$ && "$rem" -gt 0 ]] && ttl="  ttl $(_fmt_dur "$rem")"
-    _h "• $a (uid $uid) — $prof$ttl$([[ "$frozen" == true ]] && echo '  ❄️FROZEN')  · $(_agent_sessions "$a")"
+    # uid/sessions come from utmp — only meaningful for the local hub box.
+    [[ "$srv" == "local" ]] && extra=" (uid $(id -u "$a" 2>/dev/null || echo ?))  · $(_agent_sessions "$a")"
+    _h "• $a$extra — $prof$ttl$([[ "$frozen" == true ]] && echo '  ❄️FROZEN')"
   done
   _h "→ /agent <name> for detail"
 }
 
 bot_cmd_agent() {
   local a="${1:-}"; [[ -n "$a" ]] || { _h "usage: /agent <name>"; return; }
-  id -u "$a" >/dev/null 2>&1 || { _h "no such agent: $a"; return; }
-  local st; st="$(sudo -n "$L2" status "$a" --json 2>/dev/null || echo '{}')"
+  local srv; srv="$(_cur_server)"
+  local st; st="$(_l2 status "$a" --json 2>/dev/null || echo '{}')"
+  [[ "$(jq -r '.agent // empty' <<<"$st")" == "$a" ]] || { _h "[$srv] no such agent: $a"; return; }
   local prof base frozen rem ttl
   prof="$(jq -r '.current_profile // "?"' <<<"$st")"
   base="$(jq -r '.base_profile // "?"' <<<"$st")"
   frozen="$(jq -r '.frozen // false' <<<"$st")"
   rem="$(jq -r '.remaining_s // 0' <<<"$st")"
   ttl="never"; [[ "$rem" =~ ^[0-9]+$ && "$rem" -gt 0 ]] && ttl="$(_fmt_dur "$rem") left"
-  _h "🔎 $a"
-  _h "user:     $a (uid $(id -u "$a" 2>/dev/null))"
+  _h "🔎 [$srv] $a"
   _h "profile:  $prof (base $base)   ttl: $ttl$([[ "$frozen" == true ]] && echo '   ❄️FROZEN')"
-  local who_lines; who_lines="$(who 2>/dev/null | awk -v u="$a" '$1==u {h=$NF; gsub(/[()]/,"",h); printf "  %s  %s  %s %s\n", $2, h, $3, $4}')"
-  [[ -n "$who_lines" ]] && { _h "sessions:"; _h "$who_lines"; } || _h "sessions: none"
-  local rec; rec="$(sudo -n "$L2" log "$a" --since 6h 2>/dev/null | tail -n 5 || true)"
+  if [[ "$srv" == "local" ]]; then
+    _h "uid:      $(id -u "$a" 2>/dev/null)"
+    local who_lines; who_lines="$(who 2>/dev/null | awk -v u="$a" '$1==u {h=$NF; gsub(/[()]/,"",h); printf "  %s  %s  %s %s\n", $2, h, $3, $4}')"
+    [[ -n "$who_lines" ]] && { _h "sessions:"; _h "$who_lines"; } || _h "sessions: none"
+  fi
+  local rec; rec="$(_l2 log "$a" 2>/dev/null | tail -n 5 || true)"
   [[ -n "$rec" ]] && { _h "recent:"; _h "$rec"; }
 }
 
@@ -124,27 +136,30 @@ bot_cmd_revoke() {
 bot_cmd_tools() { _h "installing tools (may take a minute)…"; _admin tools >/dev/null 2>&1 & }
 
 bot_cmd_status() {
-  local up load mem disk
-  up="$(awk '{d=int($1/86400); h=int(($1%86400)/3600); m=int(($1%3600)/60); printf "%dd %dh %dm", d,h,m}' /proc/uptime 2>/dev/null)"
-  load="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
-  mem="$(free -m 2>/dev/null | awk '/^Mem:/{printf "%d/%d MiB", $3, $2}')"
-  disk="$(df -h / 2>/dev/null | awk 'NR==2{printf "%s used of %s (%s)", $3,$2,$5}')"
-  _h "🖥 $(hostname) — up ${up:-?}"
-  _h "load ${load:-?}   mem ${mem:-?}   disk / ${disk:-?}"
-  # Agents
-  local agents_json
-  agents_json="$(sudo -n "$L2" list --json 2>/dev/null || echo '[]')"
-  local n; n="$(jq 'length' <<<"$agents_json" 2>/dev/null || echo 0)"
+  local srv; srv="$(_cur_server)"
+  if [[ "$srv" == "local" ]]; then
+    local up load mem disk
+    up="$(awk '{d=int($1/86400); h=int(($1%86400)/3600); m=int(($1%3600)/60); printf "%dd %dh %dm", d,h,m}' /proc/uptime 2>/dev/null)"
+    load="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
+    mem="$(free -m 2>/dev/null | awk '/^Mem:/{printf "%d/%d MiB", $3, $2}')"
+    disk="$(df -h / 2>/dev/null | awk 'NR==2{printf "%s used of %s (%s)", $3,$2,$5}')"
+    _h "🖥 $(hostname) [local] — up ${up:-?}"
+    _h "load ${load:-?}   mem ${mem:-?}   disk / ${disk:-?}"
+  else
+    _h "🖥 [$srv]"
+    _l2 hwstat cpu 2>&1 | head -1
+  fi
+  local arr; arr="$(_l2 status --json 2>/dev/null || echo '[]')"
+  local n; n="$(jq 'length' <<<"$arr" 2>/dev/null || echo 0)"
   _h "agents: ${n}"
   local i
   for ((i=0; i<n; i++)); do
-    local a prof frozen st
-    a="$(jq -r ".[$i].agent" <<<"$agents_json")"
-    st="$(sudo -n "$L2" status "$a" --json 2>/dev/null || echo '{}')"
-    prof="$(jq -r '.current_profile // "?"' <<<"$st")"
-    frozen="$(jq -r '.frozen // false' <<<"$st")"
-    local rem; rem="$(jq -r '.remaining_s // 0' <<<"$st")"
-    local ttl=""; [[ "$rem" -gt 0 ]] && ttl=" (ttl ${rem}s)"
+    local a prof frozen rem ttl
+    a="$(jq -r ".[$i].agent" <<<"$arr")"
+    prof="$(jq -r ".[$i].current_profile // \"?\"" <<<"$arr")"
+    frozen="$(jq -r ".[$i].frozen // false" <<<"$arr")"
+    rem="$(jq -r ".[$i].remaining_s // 0" <<<"$arr")"
+    ttl=""; [[ "$rem" =~ ^[0-9]+$ && "$rem" -gt 0 ]] && ttl=" (ttl $(_fmt_dur "$rem"))"
     _h "  • ${a}: ${prof}${ttl}$([[ "$frozen" == true ]] && echo '  [FROZEN]')"
   done
 }
@@ -164,66 +179,32 @@ bot_cmd_docker() {
 bot_cmd_log() {
   local agent="${1:-}" n="${2:-20}"
   [[ -n "$agent" ]] || { _h "usage: /log <agent> [n]"; return; }
-  local out; out="$(sudo -n "$L2" log "$agent" --since 6h 2>/dev/null | tail -n "$n" || true)"
+  local out; out="$(_l2 log "$agent" 2>/dev/null | tail -n "$n" || true)"
   [[ -n "$out" ]] && _h "$out" || _h "no recent audit data for $agent"
 }
 
-# ---- hardware stats (all unprivileged; no sudo needed) ---------------------
-bot_cmd_disk() {
-  _h "💾 disk:"
-  df -h -x tmpfs -x devtmpfs -x squashfs -x overlay -x efivarfs 2>/dev/null | awk 'NR>1{
-    u=$5; gsub(/%/,"",u); w=(u+0>=85)?" ⚠️":"";
-    printf "• %s : %s/%s (%s)%s\n", $6, $3, $2, $5, w
-  }'
-}
-
-bot_cmd_mem() {
-  _h "🧠 memory:"
-  free -h 2>/dev/null | awk '/^Mem:/{printf "• RAM: %s used / %s total (free %s)\n",$3,$2,$4} /^Swap:/ && $2!="0B"{printf "• swap: %s / %s\n",$3,$2}'
-  _h "top by mem:"
-  ps -eo comm,%mem,%cpu --sort=-%mem 2>/dev/null | awk 'NR>1 && NR<=6{printf "  %-16s %5s%%m %5s%%c\n",$1,$2,$3}'
-}
-
-bot_cmd_cpu() {
-  local load nc
-  load="$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)"
-  nc="$(nproc 2>/dev/null || echo '?')"
-  _h "⚙️ cpu: load ${load:-?}  ($nc cores)"
-  _h "top by cpu:"
-  ps -eo comm,%cpu,%mem --sort=-%cpu 2>/dev/null | awk 'NR>1 && NR<=6{printf "  %-16s %5s%%c %5s%%m\n",$1,$2,$3}'
-}
-
-bot_cmd_temp() {
-  have_cmd sensors || { _h "🌡 sensors not available — install lm-sensors (llm2ssh tools install), then: sudo sensors-detect"; return; }
-  local out; out="$(sensors -A 2>/dev/null | grep -iE '°c|rpm' | sed 's/  */ /g')"
-  [[ -n "$out" ]] && { _h "🌡 sensors:"; _h "$out"; } || _h "🌡 no temperature sensors detected (try: sudo sensors-detect)"
-}
-
-bot_cmd_top() {
-  _h "📊 top processes:"
-  ps -eo pid,comm,%cpu,%mem --sort=-%cpu 2>/dev/null | awk 'NR>1 && NR<=9{printf "  %6s %-16s %5s%%c %5s%%m\n",$1,$2,$3,$4}'
-}
-
-bot_cmd_hw() {
-  local model cores ram
-  model="$(lscpu 2>/dev/null | awk -F: '/Model name/{gsub(/^[ \t]+/,"",$2); print $2; exit}')"
-  [[ -n "$model" ]] || model="$(awk -F: '/model name/{gsub(/^ +/,"",$2); print $2; exit}' /proc/cpuinfo 2>/dev/null)"
-  cores="$(nproc 2>/dev/null || echo '?')"
-  ram="$(free -h 2>/dev/null | awk '/^Mem:/{print $2}')"
-  _h "🖥 $(hostname)"
-  _h "cpu: ${model:-?} ($cores cores)"
-  _h "ram: ${ram:-?}"
-  local disks; disks="$(lsblk -d -n -o NAME,SIZE,TYPE,MODEL 2>/dev/null | awk '$3=="disk"{m=""; for(k=4;k<=NF;k++) m=m" "$k; printf "  %s  %s%s\n",$1,$2,m}')"
-  [[ -n "$disks" ]] && { _h "disks:"; _h "$disks"; }
-}
+# ---- hardware stats — routed to the current server via `llm2ssh hwstat` -----
+bot_cmd_disk() { _l2 hwstat disk 2>&1; }
+bot_cmd_mem()  { _l2 hwstat mem  2>&1; }
+bot_cmd_cpu()  { _l2 hwstat cpu  2>&1; }
+bot_cmd_temp() { _l2 hwstat temp 2>&1; }
+bot_cmd_top()  { _l2 hwstat top  2>&1; }
+bot_cmd_hw()   { _l2 hwstat hw   2>&1; }
 
 # bot_cmd_freeze VERB AGENT  (VERB: freeze|unfreeze)
 bot_cmd_freeze() {
   local verb="$1" agent="${2:-}"
   [[ -n "$agent" ]] || { _h "usage: /$verb <agent>"; return; }
-  if sudo -n "$L2" "$verb" "$agent" >/dev/null 2>&1; then
+  if _l2 "$verb" "$agent" >/dev/null 2>&1; then
     _h "✅ ${verb}d $agent"
   else
     _h "⚠️ could not $verb $agent"
   fi
+}
+
+# bot_cmd_servers — the registry, for the /server picker and text list.
+bot_cmd_servers() {
+  _h "🔀 servers (current: $(_cur_server)):"
+  "$L2" servers list 2>/dev/null | sed 's/^/  /'
+  _h "switch: /server <name>  ·  add on the server: sudo llm2ssh servers add <name> <ssh-target>"
 }

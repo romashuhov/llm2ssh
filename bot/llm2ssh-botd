@@ -177,7 +177,7 @@ _bot_onboard() {
   local agent="$1" prof="${2:-observer}" out rc errf
   [[ -n "$agent" ]] || { tg_send_message "$OWNER_CHAT_ID" "usage: /onboard <agent> [profile]"; return; }
   errf="$(mktemp)"
-  out="$(sudo -n "$BOT_ADMIN_BIN" onboard "$agent" "$prof" 2>"$errf")"; rc=$?
+  out="$(sudo -n "$L2HUB" "$(_cur_server)" onboard "$agent" "$prof" 2>"$errf")"; rc=$?
   if [[ $rc -ne 0 || -z "$out" ]]; then
     tg_send_message "$OWNER_CHAT_ID" "onboard failed: $(tail -n1 "$errf" 2>/dev/null)"
     rm -f "$errf"; return
@@ -232,6 +232,11 @@ dispatch_message() {
     /new)    rm -f "$RELAY_SESSION"; tg_send_message "$OWNER_CHAT_ID" "🆕 new conversation" ;;
     /start|/menu) bot_send_menu "$OWNER_CHAT_ID" ;;
     /instructions) tg_send_message "$OWNER_CHAT_ID" "$("$L2" instructions 2>/dev/null || echo 'unavailable')" ;;
+    /servers) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_servers)" ;;
+    /server)
+      if [[ -n "${a[0]:-}" && "${a[0]}" =~ ^[a-zA-Z0-9._-]{1,32}$ ]]; then
+        _set_server "${a[0]}"; tg_send_message "$OWNER_CHAT_ID" "🔀 now operating on: $(_cur_server)"
+      else tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_servers)"; fi ;;
     # ---- admin commands (gated by BOT_ADMIN; wrapper still refuses full/delete) ----
     /onboard|/grant|/revoke|/profiles|/tools)
       if [[ "$BOT_ADMIN" != "true" ]]; then
@@ -269,7 +274,7 @@ dispatch_callback() {
         tg_answer_callback "$cbid" "not authorized"
         blog "rejected access callback from $from (not owner)"
       fi ;;
-    m:*|hw:*|ag:*|af:*|au:*|av:*|ag2:*|agp:*|agt:*)
+    m:*|sv:*|hw:*|ag:*|af:*|au:*|av:*|ag2:*|agp:*|agt:*)
       # Menu navigation — owner-gate here (unlike a:/g: which self-gate).
       if [[ "$from" != "$OWNER_USER_ID" || "$chat" != "$OWNER_CHAT_ID" ]]; then
         tg_answer_callback "$cbid" "not authorized"; blog "rejected menu callback from $from"; return
