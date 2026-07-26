@@ -52,9 +52,11 @@ cmd_connect_info() {
     declare -F sshd_reload >/dev/null 2>&1 && sshd_reload || true
   fi
 
-  local host alias kh
+  local host slug alias keyname kh
   host="$(_detect_host)"
-  alias="llm-$agent"
+  slug="$(_host_slug)"                # from lib/onboard.sh (both sourced by the CLI)
+  alias="llm-$slug-$agent"           # host-specific: distinct per box (no collision)
+  keyname="${slug}_${agent}"
   kh="$(_known_hosts_line "$host" || true)"
 
   local nkeys_now=0
@@ -80,7 +82,7 @@ EOF
   if [[ -n "$privkey" ]]; then
     cat <<EOF
 
-# ▶ PRIVATE KEY (shown ONCE — save to ~/.ssh/llm2ssh_$agent, chmod 600):
+# ▶ PRIVATE KEY (shown ONCE — save to ~/.ssh/llm2ssh_$keyname, chmod 600):
 $privkey
 EOF
   fi
@@ -92,7 +94,7 @@ Host $alias
     HostName $host
     Port 22
     User $agent
-    IdentityFile ~/.ssh/llm2ssh_$agent
+    IdentityFile ~/.ssh/llm2ssh_$keyname
     IdentitiesOnly yes
     StrictHostKeyChecking yes
     ServerAliveInterval 15

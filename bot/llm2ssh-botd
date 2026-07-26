@@ -231,7 +231,7 @@ dispatch_message() {
       else tg_send_message "$OWNER_CHAT_ID" "unfreeze via Telegram is disabled; use SSH"; fi ;;
     /new)    rm -f "$RELAY_SESSION"; tg_send_message "$OWNER_CHAT_ID" "🆕 new conversation" ;;
     /start|/menu) bot_send_menu "$OWNER_CHAT_ID" ;;
-    /instructions) tg_send_message "$OWNER_CHAT_ID" "$("$L2" instructions 2>/dev/null || echo 'unavailable')" ;;
+    /instructions) tg_send_message "$OWNER_CHAT_ID" "[$(_cur_server)]"$'\n'"$(_l2 instructions 2>/dev/null || echo 'unavailable')" ;;
     /servers) tg_send_message "$OWNER_CHAT_ID" "$(bot_cmd_servers)" ;;
     /server)
       if [[ -n "${a[0]:-}" && "${a[0]}" =~ ^[a-zA-Z0-9._-]{1,32}$ ]]; then

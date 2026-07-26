@@ -39,7 +39,7 @@ setup() {
 @test "connect-info prints an ssh config block" {
   run "$L" connect-info a1
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Host llm-a1"* ]]
+  [[ "$output" =~ Host\ llm-[a-zA-Z0-9-]+-a1 ]]    # host-specific alias
   [[ "$output" == *"User a1"* ]]
   [[ "$output" == *"llm2ssh-ctx"* ]]
 }

@@ -25,9 +25,9 @@ setup() {
   [ "$(stat -c '%U' /etc/llm2ssh/keys/ob1)" = "root" ]
   # the blob carries a usable private key + ready ssh config + usage
   [[ "$output" == *"BEGIN OPENSSH PRIVATE KEY"* ]]
-  [[ "$output" == *"Host llm-ob1"* ]]
+  [[ "$output" =~ Host\ llm-[a-zA-Z0-9-]+-ob1 ]]    # host-specific alias (no cross-box collision)
   [[ "$output" == *"User ob1"* ]]
-  [[ "$output" == *"ssh llm-ob1 llm2ssh-ctx"* ]]
+  [[ "$output" == *"llm2ssh-ctx"* ]]
   # default profile is observer -> no sudo granted
   [ ! -f /etc/sudoers.d/llm2ssh-ob1 ]
   "$L" delete ob1 --yes

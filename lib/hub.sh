@@ -73,7 +73,8 @@ cmd_hub_authorize() {
 Cmnd_Alias LLM2SSH_HUB = /usr/local/bin/llm2ssh status, /usr/local/bin/llm2ssh status *, \\
     /usr/local/bin/llm2ssh list, /usr/local/bin/llm2ssh list *, \\
     /usr/local/bin/llm2ssh log *, /usr/local/bin/llm2ssh hwstat, /usr/local/bin/llm2ssh hwstat *, \\
-    /usr/local/bin/llm2ssh version, \\
+    /usr/local/bin/llm2ssh version, /usr/local/bin/llm2ssh instructions, /usr/local/bin/llm2ssh instructions *, \\
+    /usr/local/bin/llm2ssh profiles, \\
     /usr/local/bin/llm2ssh freeze *, /usr/local/bin/llm2ssh unfreeze *, \\
     $dbin ps --format json, $dbin ps -a --format json, \\
     /usr/local/lib/llm2ssh/bin/llm2ssh-bot-admin *

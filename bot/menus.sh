@@ -135,7 +135,7 @@ bot_menu_callback() {
     m:agents) tg_edit_keyboard "$chat" "$msgid" "👥 Agents — tap one:" "$(_kb_agents)" ;;
     m:docker) tg_edit_keyboard "$chat" "$msgid" "$(bot_cmd_docker)" "$(_kb_back m:home '« Menu')" ;;
     m:status) tg_edit_keyboard "$chat" "$msgid" "$(bot_cmd_status)" "$(_kb_back m:home '« Menu')" ;;
-    m:instr)  tg_edit_keyboard "$chat" "$msgid" "$("$L2" instructions 2>/dev/null | head -c 3500)" "$(_kb_back m:home '« Menu')" ;;
+    m:instr)  tg_edit_keyboard "$chat" "$msgid" "[$(_cur_server)]"$'\n'"$(_l2 instructions 2>/dev/null | head -c 3400)" "$(_kb_back m:home '« Menu')" ;;
     m:help)   tg_edit_keyboard "$chat" "$msgid" "$(bot_cmd_help "$BOT_ADMIN")" "$(_kb_back m:home '« Menu')" ;;
     hw:disk)  tg_edit_keyboard "$chat" "$msgid" "$(bot_cmd_disk)" "$(_kb_back m:hw '« Hardware')" ;;
     hw:mem)   tg_edit_keyboard "$chat" "$msgid" "$(bot_cmd_mem)"  "$(_kb_back m:hw '« Hardware')" ;;

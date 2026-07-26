@@ -25,7 +25,7 @@ verb="${1:-}"; shift || true
 # Verb allowlist + which remote binary it runs through.
 kind=""
 case "$verb" in
-  status|list|log|hwstat|version|freeze|unfreeze) kind="read" ;;
+  status|list|log|hwstat|version|freeze|unfreeze|instructions|profiles) kind="read" ;;
   onboard|grant|revoke|tools)                     kind="admin" ;;
   *) die2 "verb '$verb' not allowed via the hub" ;;
 esac

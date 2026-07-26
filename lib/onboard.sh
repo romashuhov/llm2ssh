@@ -48,9 +48,11 @@ cmd_onboard() {
   rm -rf "$tmpd"
   declare -F sshd_reload >/dev/null 2>&1 && sshd_reload || true
 
-  local host alias kh
+  local host slug alias keyname kh
   host="$(_detect_host)"
-  alias="llm-$agent"
+  slug="$(_host_slug)"
+  alias="llm-$slug-$agent"          # host-specific: distinct alias per box (no collision)
+  keyname="${slug}_${agent}"        # host-specific key file name too
   kh="$(_known_hosts_line "$host" || true)"
 
   # Human note -> stderr; the copy-paste block -> stdout.
@@ -60,8 +62,16 @@ cmd_onboard() {
     warn "no ssh host key found — the agent will be asked to accept the host on first connect."
   fi
 
-  _onboard_blob "$agent" "$host" "$alias" "$kh" "$priv"
+  _onboard_blob "$agent" "$host" "$alias" "$kh" "$priv" "$keyname"
   return 0
+}
+
+# _host_slug — a short, filesystem/ssh-safe tag for THIS host, so onboarding the
+# same agent name on several boxes yields distinct aliases and key files.
+_host_slug() {
+  local s; s="$(hostname -s 2>/dev/null || hostname 2>/dev/null)"
+  s="$(printf '%s' "$s" | tr -cs 'a-zA-Z0-9' '-' | sed 's/^-*//; s/-*$//' | cut -c1-24)"
+  printf '%s' "${s:-host}"
 }
 
 # Apply a starting profile without holding a second lock (we're already locked).
@@ -73,23 +83,23 @@ with_lock_noop_grant() {
 }
 
 _onboard_blob() {
-  local agent="$1" host="$2" alias="$3" kh="$4" priv="$5"
+  local agent="$1" host="$2" alias="$3" kh="$4" priv="$5" keyname="${6:-$1}"
   cat <<'HDR'
 # ═══════════════════════════════════════════════════════════════════════
 # Paste EVERYTHING below (including the code block) into your agent's chat.
 # ═══════════════════════════════════════════════════════════════════════
 HDR
   printf 'You have SSH access to the server "%s" as the restricted user "%s" (managed by llm2ssh).\n' "$host" "$agent"
-  printf 'First, run this one-time setup:\n\n'
+  printf 'Reach it with the alias "%s". First, run this one-time setup:\n\n' "$alias"
   printf '```bash\n'
   printf 'mkdir -p ~/.ssh && chmod 700 ~/.ssh\n'
-  printf "cat > ~/.ssh/llm2ssh_%s <<'LLM2SSH_KEY'\n" "$agent"
+  printf "cat > ~/.ssh/llm2ssh_%s <<'LLM2SSH_KEY'\n" "$keyname"
   printf '%s\n' "$priv"
   printf 'LLM2SSH_KEY\n'
-  printf 'chmod 600 ~/.ssh/llm2ssh_%s\n' "$agent"
+  printf 'chmod 600 ~/.ssh/llm2ssh_%s\n' "$keyname"
   printf "grep -qs '^Host %s\$' ~/.ssh/config || cat >> ~/.ssh/config <<'LLM2SSH_CFG'\n" "$alias"
   printf '\nHost %s\n    HostName %s\n    User %s\n    IdentityFile ~/.ssh/llm2ssh_%s\n    IdentitiesOnly yes\n    StrictHostKeyChecking yes\n' \
-         "$alias" "$host" "$agent" "$agent"
+         "$alias" "$host" "$agent" "$keyname"
   printf 'LLM2SSH_CFG\n'
   if [[ -n "$kh" ]]; then
     printf "grep -qsF '%s' ~/.ssh/known_hosts || echo '%s' >> ~/.ssh/known_hosts\n" "$kh" "$kh"
