@@ -93,7 +93,9 @@ _kb_duration() {
     [{text:"⏱ 1h",callback_data:$h1},{text:"⏱ 4h",callback_data:$h4}],
     [{text:"⏱ 1d",callback_data:$d1},{text:"♾ Forever",callback_data:$pm}],
     [{text:"« Cancel",callback_data:$back}]
-  ]'
+  ]' | if profile_requires_ttl "$p" 2>/dev/null; then
+         jq -c '.[1] |= map(select(.text != "♾ Forever"))'   # time-limited profile
+       else cat; fi
 }
 
 # ---- sending / editing ------------------------------------------------------

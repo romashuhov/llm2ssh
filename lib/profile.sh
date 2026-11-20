@@ -11,6 +11,7 @@
 #   P_WARN[]                   — warnings printed at grant time
 #   P_NEEDS_SERVICES           — 0/1 (requires --services)
 #   P_SUDO_ALL                 — 0/1 (full root)
+#   P_TTL_REQUIRED             — 0/1 (grant only with --ttl)
 
 [[ -n "${_LLM2SSH_PROFILE_SOURCED:-}" ]] && return 0
 _LLM2SSH_PROFILE_SOURCED=1
@@ -120,6 +121,7 @@ _profile_parse_into() {
       warn)        P_WARN+=("$rest") ;;
       ask)         P_ASK+=("$rest") ;;
       requestable) [[ "$is_include" == 0 && "$rest" == "yes" ]] && P_REQUESTABLE=1 ;;
+      ttl-required) [[ "$is_include" == 0 && "$rest" == "yes" ]] && P_TTL_REQUIRED=1 ;;
       needs-services) [[ "$rest" == "yes" ]] && P_NEEDS_SERVICES=1 ;;
       sudo-all)       [[ "$rest" == "yes" ]] && P_SUDO_ALL=1 ;;
       include)
@@ -158,7 +160,7 @@ profile_load() {
   file="$(profile_file "$name")" || die_notfound "no such profile: '$name'"
   P_NAME="$name"; P_DESC=""
   P_GROUPS=(); P_SUDO=(); P_WARN=(); P_ASK=()
-  P_NEEDS_SERVICES=0; P_SUDO_ALL=0; P_REQUESTABLE=0
+  P_NEEDS_SERVICES=0; P_SUDO_ALL=0; P_REQUESTABLE=0; P_TTL_REQUIRED=0
   _PROFILE_VISITED=" $name "     # top profile counts as visited (self-include guard)
   _profile_parse_into "$file"
 }
@@ -168,6 +170,14 @@ profile_load() {
 profile_is_requestable() {
   local f; f="$(profile_file "$1")" || return 1
   grep -qE '^[[:space:]]*requestable[[:space:]]+yes([[:space:]]|$)' "$f"
+}
+
+# profile_requires_ttl NAME -> 0 if the profile carries `ttl-required yes`
+# (it may only be granted for a limited time — no "forever" button, no
+# open-ended `grant`).
+profile_requires_ttl() {
+  local f; f="$(profile_file "$1")" || return 1
+  grep -qE '^[[:space:]]*ttl-required[[:space:]]+yes([[:space:]]|$)' "$f"
 }
 
 # list_requestable_profiles -> names an agent may request (one per line).
@@ -225,6 +235,7 @@ cmd_profile() {
       fi
       [[ "$P_NEEDS_SERVICES" -eq 1 ]] && printf 'requires: --services <unit,...>\n'
       [[ "$P_REQUESTABLE" -eq 1 ]] && printf 'requestable: yes (an agent may ask for this via llm2ssh-request)\n'
+      [[ "$P_TTL_REQUIRED" -eq 1 ]] && printf 'ttl-required: yes (only granted with --ttl)\n'
       if [[ ${#P_ASK[@]} -gt 0 ]]; then
         printf 'owner approval required for:\n'
         local a; for a in "${P_ASK[@]}"; do printf '  %s\n' "$a"; done

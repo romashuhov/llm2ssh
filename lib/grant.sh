@@ -148,6 +148,10 @@ cmd_grant() {
   # Load to validate and to inspect flags (needs-services / sudo-all / warns).
   profile_load "$profile"
 
+  if [[ "${P_TTL_REQUIRED:-0}" -eq 1 && -z "$ttl" ]]; then
+    die_usage "profile '$profile' may only be granted for a limited time — add --ttl (e.g. --ttl 1h)"
+  fi
+
   if [[ "$P_NEEDS_SERVICES" -eq 1 ]]; then
     [[ -n "$services" ]] || die_usage "profile '$profile' requires --services <unit,...>"
     _write_services_allow "$agent" "$services"

@@ -110,7 +110,7 @@ fi
 _log "installing code to $PREFIX_LIB"
 install -d -m 0755 "$PREFIX_LIB"
 # Mirror the tree; only code dirs, never state.
-for d in lib profiles wrappers hooks bot systemd tmpfiles.d; do
+for d in lib profiles wrappers hooks bot systemd tmpfiles.d examples; do
   [[ -d "$SRC/$d" ]] || continue
   rm -rf "${PREFIX_LIB:?}/$d"
   cp -a "$SRC/$d" "$PREFIX_LIB/$d"
@@ -131,6 +131,7 @@ install -d -m 0755 "$PREFIX_LIB/bin"
 [[ -f "$SRC/wrappers/llm2ssh-bot-admin" ]] && install -m 0755 "$SRC/wrappers/llm2ssh-bot-admin" "$PREFIX_LIB/bin/llm2ssh-bot-admin"
 [[ -f "$SRC/wrappers/llm2ssh-hub" ]]       && install -m 0755 "$SRC/wrappers/llm2ssh-hub"       "$PREFIX_LIB/bin/llm2ssh-hub"
 [[ -f "$SRC/wrappers/llm2ssh-du" ]]        && install -m 0755 "$SRC/wrappers/llm2ssh-du"        "$PREFIX_LIB/bin/llm2ssh-du"
+[[ -f "$SRC/wrappers/llm2ssh-deploy" ]]    && install -m 0755 "$SRC/wrappers/llm2ssh-deploy"    "$PREFIX_LIB/bin/llm2ssh-deploy"
 [[ -f "$SRC/bot/relay-exec" ]]             && install -m 0755 "$SRC/bot/relay-exec"             "$PREFIX_LIB/bin/relay-exec"
 
 # CLI entrypoint.
@@ -150,6 +151,8 @@ _log "creating state directories"
 install -d -m 0755 /etc/llm2ssh
 install -d -m 0755 /etc/llm2ssh/keys
 install -d -m 0755 /etc/llm2ssh/profiles.d
+# deploy targets for the `deploy` profile (owner-written; examples in $PREFIX_LIB/examples/deploy.d)
+install -d -o root -g root -m 0755 /etc/llm2ssh/deploy.d
 install -d -m 0700 /var/lib/llm2ssh
 install -d -m 0700 /var/lib/llm2ssh/agents
 # -o/-g repairs ownership if an earlier bot unit's LogsDirectory chowned this to

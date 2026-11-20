@@ -1,0 +1,478 @@
+#!/bin/bash
+# llm2ssh-deploy — root-owned deploy wrapper for the `deploy` profile.
+# THE SECURITY BOUNDARY for that profile: sudoers lets the agent run ONLY this
+# file as root, so it must never trust its arguments. Review every line.
+#
+# What it gives: a FIXED set of deploy actions on projects ("targets") that the
+# owner described in root-owned /etc/llm2ssh/deploy.d/<target>.conf. Every action
+# runs as the project's owner (run-as, never root) inside the project dir, with a
+# clean environment and stdin from /dev/null. The agent never gets a shell, never
+# reads the project tree, and never sees secrets from .env.
+#
+#   llm2ssh-deploy list
+#   llm2ssh-deploy update         <target>                 # ./update.sh </dev/null
+#   llm2ssh-deploy compose        <target> <name>          # docker compose -f <file> up -d --build --force-recreate
+#   llm2ssh-deploy query          <target> <name>          # fixed read-only SQL from the config
+#   llm2ssh-deploy git-log        <target>                 # git log -1
+#   llm2ssh-deploy git-status     <target>                 # tracked-file changes only
+#   llm2ssh-deploy restart-policy <target> <container> <no|always|unless-stopped|on-failure[:N]>
+#   llm2ssh-deploy env-show       <target>                 # names + values, secrets masked
+#   llm2ssh-deploy env-set        <target> <NAME> <VALUE> [--line N]
+#                                  # owner approves the exact diff in Telegram; .env backed up first
+#
+# Config (/etc/llm2ssh/deploy.d/<target>.conf, root-owned, PARSED never sourced):
+#   run-as <user>  dir <abs path>  update-script <rel>  env-file <rel>
+#   env-edit <NAME...|*>  env-secret <NAME...>  env-public <NAME...>
+#   container <name...>  compose <name> <rel file>  compose-env <VAR> <value|%DIR_UID%|%DIR_GID%|%DOCKER_GID%>
+#   query <name> <container> <db user> <db> <SQL...>  confirm <verb...>
+#   allow-agent <agent...>  timeout <seconds>
+#
+# Exit codes: 0 ok · 2 usage · 3 refused/denied · 4 not found · otherwise the
+# action's own exit code.
+set -euo pipefail
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+unset IFS CDPATH
+umask 077
+
+CONF_DIR=/etc/llm2ssh/deploy.d
+BACKUP_BASE=/var/lib/llm2ssh/deploy
+LOCK_DIR=/run/llm2ssh/deploy
+FROZEN_DIR=/run/llm2ssh/agents
+APPROVE_BIN=/usr/local/bin/llm2ssh-approve
+APPROVE_TIMEOUT=180
+SAFE_PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin
+BACKUP_KEEP=30
+
+# .env names an agent may never change, even with approval: they redirect what
+# docker/compose/git/the shell talk to or load, i.e. turn an edit into code exec.
+ENV_DENY_RE='^(PATH|HOME|SHELL|ENV|BASH_ENV|IFS|PS4|PROMPT_COMMAND|NODE_OPTIONS|LD_[A-Z0-9_]*|DOCKER_[A-Z0-9_]*|COMPOSE_[A-Z0-9_]*|BUILDKIT_[A-Z0-9_]*|GIT_[A-Z0-9_]*|SSH_[A-Z0-9_]*|PYTHON[A-Z0-9_]*|PERL[A-Z0-9_]*|RUBY[A-Z0-9_]*)$'
+# Names that look like secrets (matched case-insensitively against the NAME).
+SECRET_NAME_RE='(KEY|TOKEN|SECRET|PASS|PWD|PRIVATE|CREDENTIAL|AUTH|COOKIE|SALT|SIGNATURE|SESSION|DSN|WEBHOOK|LOGIN)'
+
+die()    { echo "llm2ssh-deploy: $*" >&2; exit "${2:-3}"; }
+usage()  {
+  cat >&2 <<'EOF'
+usage: sudo llm2ssh-deploy <verb> ...
+  list
+  update         <target>
+  compose        <target> <name>
+  query          <target> <name>
+  git-log        <target>
+  git-status     <target>
+  restart-policy <target> <container> <no|always|unless-stopped|on-failure[:N]>
+  env-show       <target>
+  env-set        <target> <NAME> <VALUE> [--line N]   (owner approves in Telegram)
+EOF
+  exit 2
+}
+audit()  { logger -t llm2ssh -p "auth.${2:-info}" "deploy: $1 (agent ${agent:-?})" 2>/dev/null || true; }
+
+# ---- who is calling ---------------------------------------------------------
+# SUDO_USER is trustworthy here: this binary only ever runs under sudo.
+[[ "$(id -u)" -eq 0 ]] || die "must run via sudo"
+agent="${SUDO_USER:-}"
+[[ "$agent" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "no valid SUDO_USER"
+[[ -e "$FROZEN_DIR/$agent.frozen" ]] && die "agent '$agent' is frozen"
+
+# ---- config parsing (never `source`) ----------------------------------------
+# _secure_root_file PATH -> refuse unless root-owned and not group/other-writable.
+_secure_root_file() {
+  local p="$1" owner mode
+  [[ -e "$p" && ! -L "$p" ]] || return 1
+  owner="$(stat -c %u "$p")"; mode="$(stat -c %a "$p")"
+  [[ "$owner" == 0 ]] || return 1
+  (( 0${mode: -2:1} & 2 )) && return 1
+  (( 0${mode: -1:1} & 2 )) && return 1
+  return 0
+}
+
+# _relpath VALUE -> 0 if a safe path relative to the project dir.
+_relpath() { [[ "$1" =~ ^[A-Za-z0-9._][A-Za-z0-9._/-]*$ && "/$1/" != *"/../"* ]]; }
+
+target_conf() { printf '%s/%s.conf' "$CONF_DIR" "$1"; }
+
+load_target() {
+  local t="$1" f line key rest a b
+  [[ "$t" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || die "bad target name" 2
+  f="$(target_conf "$t")"
+  [[ -f "$f" ]] || die "no deploy target '$t' (see: sudo llm2ssh-deploy list)" 4
+  _secure_root_file "$CONF_DIR" || die "$CONF_DIR is not root-owned/secure"
+  _secure_root_file "$f" || die "$f is not root-owned/secure"
+  TARGET="$t"; RUN_AS=""; DIR=""; UPDATE_SCRIPT="update.sh"; ENV_FILE=""; TIMEOUT=3600
+  ENV_EDIT=(); ENV_SECRET=(); ENV_PUBLIC=(); CONTAINERS=(); CONFIRM=(); ALLOW_AGENTS=()
+  COMPOSE_ENV=()
+  declare -gA COMPOSE=() QUERY=()
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    key="${line%%[[:space:]]*}"; rest="${line#"$key"}"; rest="${rest#"${rest%%[![:space:]]*}"}"
+    case "$key" in
+      run-as)        RUN_AS="$rest" ;;
+      dir)           DIR="$rest" ;;
+      update-script) _relpath "$rest" || die "$f: bad update-script"; UPDATE_SCRIPT="$rest" ;;
+      env-file)      _relpath "$rest" || die "$f: bad env-file"; ENV_FILE="$rest" ;;
+      timeout)       [[ "$rest" =~ ^[0-9]{1,5}$ ]] || die "$f: bad timeout"; TIMEOUT="$rest" ;;
+      env-edit)      read -ra a <<<"$rest"; ENV_EDIT+=("${a[@]}") ;;
+      env-secret)    read -ra a <<<"$rest"; ENV_SECRET+=("${a[@]}") ;;
+      env-public)    read -ra a <<<"$rest"; ENV_PUBLIC+=("${a[@]}") ;;
+      container)     read -ra a <<<"$rest"; CONTAINERS+=("${a[@]}") ;;
+      confirm)       read -ra a <<<"$rest"; CONFIRM+=("${a[@]}") ;;
+      allow-agent)   read -ra a <<<"$rest"; ALLOW_AGENTS+=("${a[@]}") ;;
+      compose)
+        read -r a b <<<"$rest"
+        if ! [[ "$a" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ ]] || ! _relpath "${b:-}"; then die "$f: bad compose line"; fi
+        COMPOSE[$a]="$b" ;;
+      compose-env)
+        read -r a b <<<"$rest"
+        [[ "$a" =~ ^[A-Z_][A-Z0-9_]*$ && "${b:-}" =~ ^[A-Za-z0-9._%/:-]*$ ]] || die "$f: bad compose-env line"
+        [[ "$a" =~ $ENV_DENY_RE ]] && die "$f: compose-env $a is not allowed"
+        COMPOSE_ENV+=("$a=$b") ;;
+      query)
+        local qn qc qu qd qs
+        read -r qn qc qu qd qs <<<"$rest"
+        [[ "$qn" =~ ^[a-z0-9][a-z0-9_-]{0,31}$ && "$qc" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ \
+           && "$qu" =~ ^[A-Za-z0-9_]+$ && "$qd" =~ ^[A-Za-z0-9_]+$ && -n "$qs" ]] || die "$f: bad query line"
+        QUERY[$qn]="$qc"$'\t'"$qu"$'\t'"$qd"$'\t'"$qs" ;;
+      *) die "$f: unknown directive '$key'" ;;
+    esac
+  done <"$f"
+
+  [[ "$RUN_AS" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "$f: bad or missing run-as"
+  [[ "$DIR" == /* && "$DIR" != *$'\n'* && "/$DIR/" != *"/../"* ]] || die "$f: dir must be an absolute path"
+  RUN_UID="$(id -u "$RUN_AS" 2>/dev/null)" || die "$f: run-as user '$RUN_AS' does not exist"
+  RUN_GID="$(id -g "$RUN_AS")"
+  [[ "$RUN_UID" -ne 0 ]] || die "$f: run-as must not be root"
+  [[ "$RUN_AS" != "$agent" ]] || die "$f: run-as must not be the agent itself"
+  RUN_HOME="$(getent passwd "$RUN_AS" | cut -d: -f6)"
+  [[ -d "$DIR" && ! -L "$DIR" ]] || die "project dir $DIR is missing" 4
+  [[ "$(stat -c %u "$DIR")" == "$RUN_UID" ]] || die "project dir $DIR is not owned by $RUN_AS"
+
+  if [[ ${#ALLOW_AGENTS[@]} -gt 0 ]]; then
+    local ok=0 x; for x in "${ALLOW_AGENTS[@]}"; do [[ "$x" == "$agent" ]] && ok=1; done
+    [[ "$ok" -eq 1 ]] || die "agent '$agent' may not deploy '$TARGET'"
+  fi
+}
+
+# _agent_can_write PATH -> 0 if the CALLING agent could write PATH (checked as
+# the agent itself, so groups/ACLs count). If the agent could plant code there,
+# running it as the owner would be an escalation — so we refuse to run at all.
+_agent_can_write() {
+  [[ -e "$1" ]] || return 1
+  setpriv --reuid="$(id -u "$agent")" --regid="$(id -g "$agent")" --init-groups -- test -w "$1" 2>/dev/null
+}
+
+# Refuse unless the project tree's entry points are closed to the agent.
+require_closed_tree() {
+  local p="$DIR" x
+  while [[ -n "$p" && "$p" != "/" ]]; do
+    _agent_can_write "$p" && die "the agent can write $p — close it first (chmod o-w / remove from group)"
+    p="$(dirname "$p")"
+  done
+  for x in "$@"; do
+    _agent_can_write "$DIR/$x" && die "the agent can write $DIR/$x — close it first"
+  done
+  return 0
+}
+
+# _lock — one deploy action per target at a time (update vs env-set race).
+_lock() {
+  install -d -m 0700 "$LOCK_DIR"
+  exec 9>"$LOCK_DIR/$TARGET.lock"
+  flock -n 9 || die "another deploy action on '$TARGET' is running — wait and retry"
+}
+
+# as_owner CMD... — run as the project owner, in the project dir, clean env,
+# stdin from /dev/null, bounded by the target's timeout.
+as_owner() {
+  local extra=()
+  while [[ "${1:-}" == *=* && "${1%%=*}" =~ ^[A-Z_][A-Z0-9_]*$ ]]; do extra+=("$1"); shift; done
+  ( cd "$DIR" && exec timeout -k 30 "$TIMEOUT" \
+      setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --init-groups -- \
+      env -i HOME="$RUN_HOME" USER="$RUN_AS" LOGNAME="$RUN_AS" PATH="$SAFE_PATH" LANG=C.UTF-8 PWD="$DIR" \
+      ${extra[@]+"${extra[@]}"} "$@" </dev/null )
+}
+
+# ---- owner approval (Telegram) — ALWAYS fail closed --------------------------
+approve() {
+  local text="$1" req rc
+  [[ -x "$APPROVE_BIN" ]] || die "approval broker client missing — cannot ask the owner"
+  req="$(jq -nc --arg u "$agent" --arg cmd "$text" --arg cwd "$DIR" \
+          '{source:"sudo-wrapper", user:$u, profile:"deploy", command:$cmd, cwd:$cwd}')" \
+    || die "could not build approval request"
+  echo "Waiting for the owner's approval in Telegram (up to ${APPROVE_TIMEOUT}s)…" >&2
+  set +e
+  printf '%s' "$req" | "$APPROVE_BIN" request --timeout "$APPROVE_TIMEOUT" >/dev/null 2>&1
+  rc=$?
+  set -e
+  case "$rc" in
+    0) audit "approved: $text"; return 0 ;;
+    1) audit "owner DENIED: $text" warning; die "owner denied" ;;
+    2) audit "approval timed out: $text" warning; die "no answer from the owner in ${APPROVE_TIMEOUT}s (denied)" ;;
+    3) die "no Telegram approval channel is running — the owner must start the bot (denied)" ;;
+    *) die "approval error ($rc) — denied" ;;
+  esac
+}
+
+# maybe_confirm VERB TEXT — owner approval for verbs listed in `confirm`.
+maybe_confirm() {
+  local v; for v in ${CONFIRM[@]+"${CONFIRM[@]}"}; do
+    [[ "$v" == "$1" || "$v" == "all" ]] && { approve "$2"; return 0; }
+  done
+  return 0
+}
+
+# ---- .env helpers -----------------------------------------------------------
+_in_list() { local n="$1" x; shift; for x in "$@"; do [[ "$x" == "$n" ]] && return 0; done; return 1; }
+
+# _is_secret NAME VALUE -> 0 if the value must be masked.
+_is_secret() {
+  local n="$1" v="$2"
+  _in_list "$n" ${ENV_PUBLIC[@]+"${ENV_PUBLIC[@]}"} && return 1
+  _in_list "$n" ${ENV_SECRET[@]+"${ENV_SECRET[@]}"} && return 0
+  [[ "${n^^}" =~ $SECRET_NAME_RE ]] && return 0
+  [[ "$v" =~ ^[A-Za-z0-9_+/=-]{32,}$ ]] && return 0   # looks like a key/hash
+  return 1
+}
+
+# _mask VALUE -> last 4 chars only (nothing at all for short values).
+_mask() {
+  local v="$1" n="${#1}"
+  if [[ "$n" -eq 0 ]]; then printf '(empty)'
+  elif [[ "$n" -lt 12 ]]; then printf '****(%d chars)' "$n"
+  else printf '****%s(%d chars)' "${v: -4}" "$n"
+  fi
+}
+
+# _show NAME VALUE -> display form (masked when secret; credentials in URLs masked).
+_show() {
+  local n="$1" v="$2" u
+  if _is_secret "$n" "$v"; then _mask "$v"; return; fi
+  # scheme://user:password@host — mask only the password part.
+  if [[ "$v" =~ ^([A-Za-z][A-Za-z0-9+.-]*://[^:/@]*:)([^@]*)(@.*)$ ]]; then
+    u="${BASH_REMATCH[1]}$(_mask "${BASH_REMATCH[2]}")${BASH_REMATCH[3]}"
+    v="$u"
+  fi
+  [[ "${#v}" -gt 200 ]] && v="${v:0:200}…"
+  printf '%s' "$v"
+}
+
+# _unquote RAW -> value without one pair of surrounding quotes.
+_unquote() {
+  local r="$1"
+  if [[ "${#r}" -ge 2 && ( ( "${r:0:1}" == '"' && "${r: -1}" == '"' ) || ( "${r:0:1}" == "'" && "${r: -1}" == "'" ) ) ]]; then
+    r="${r:1:${#r}-2}"
+  fi
+  printf '%s' "$r"
+}
+
+ENV_LINE_RE='^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)=(.*)$'
+
+env_path() {
+  [[ -n "$ENV_FILE" ]] || die "target '$TARGET' has no env-file configured" 4
+  local p="$DIR/$ENV_FILE"
+  [[ -f "$p" && ! -L "$p" ]] || die "$ENV_FILE not found (or is a symlink) in $TARGET" 4
+  [[ "$(stat -c %u "$p")" == "$RUN_UID" ]] || die "$ENV_FILE is not owned by $RUN_AS"
+  printf '%s' "$p"
+}
+
+cmd_env_show() {
+  local p line n=0 name raw
+  p="$(env_path)"
+  printf '%s %s — secrets masked (last 4 chars at most)\n' "$TARGET" "$ENV_FILE"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    n=$((n+1)); line="${line%$'\r'}"
+    [[ "$line" =~ $ENV_LINE_RE ]] || continue
+    name="${BASH_REMATCH[2]}"; raw="${BASH_REMATCH[3]}"
+    printf '%5d  %s=%s\n' "$n" "$name" "$(_show "$name" "$(_unquote "$raw")")"
+  done <"$p"
+}
+
+cmd_env_set() {
+  local name="${1:-}" value="${2:-}" want_line=""
+  [[ $# -ge 2 ]] || die "usage: llm2ssh-deploy env-set <target> <NAME> <VALUE> [--line N]" 2
+  shift 2
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --line) [[ "${2:-}" =~ ^[0-9]{1,6}$ ]] || die "bad --line" 2; want_line="$2"; shift 2 ;;
+      *) die "unknown flag: $1" 2 ;;
+    esac
+  done
+  [[ "$name" =~ ^[A-Za-z_][A-Za-z0-9_]{0,63}$ ]] || die "bad variable name" 2
+  [[ "$name" =~ $ENV_DENY_RE ]] && die "$name may never be changed by an agent (it changes what runs, not how)"
+  if ! _in_list "*" ${ENV_EDIT[@]+"${ENV_EDIT[@]}"} && ! _in_list "$name" ${ENV_EDIT[@]+"${ENV_EDIT[@]}"}; then
+    die "$name is not in env-edit for '$TARGET'"
+  fi
+  # The value is written raw into a dotenv file read by compose and shell loops:
+  # forbid anything that changes parsing (quotes, expansion, escapes, comments).
+  [[ "${#value}" -le 1024 ]] || die "value too long (max 1024)" 2
+  case "$value" in
+    *$'\n'*|*$'\r'*|*'$'*|*'`'*|*'\'*|*'"'*|*"'"*|*' #'*) die "value contains a forbidden character (newline, \$, \`, \\, quotes or ' #')" 2 ;;
+  esac
+  [[ "$value" =~ ^[[:print:]]*$ ]] || die "value contains non-printable characters" 2
+  [[ "$value" == "${value# }" && "$value" == "${value% }" ]] || die "value must not start or end with a space" 2
+
+  local p sum lines=() i idx=-1 count=0 old_raw="" prefix="" q="" cr=""
+  p="$(env_path)"
+  require_closed_tree "$ENV_FILE"
+  _lock
+  sum="$(sha256sum "$p" | cut -d' ' -f1)"
+  mapfile -t lines <"$p"
+  for i in "${!lines[@]}"; do
+    local l="${lines[i]%$'\r'}"
+    if [[ "$l" =~ $ENV_LINE_RE && "${BASH_REMATCH[2]}" == "$name" ]]; then
+      idx="$i"; count=$((count+1)); prefix="${BASH_REMATCH[1]}"; old_raw="${BASH_REMATCH[3]}"
+      [[ "${lines[i]}" == *$'\r' ]] && cr=$'\r'
+    fi
+  done
+  [[ "$count" -le 1 ]] || die "$name is defined $count times in $ENV_FILE — fix it by hand"
+
+  local new_line old_show new_show where
+  if [[ "$idx" -ge 0 ]]; then
+    [[ -z "$want_line" || "$want_line" -eq $((idx+1)) ]] || die "$name is on line $((idx+1)), not $want_line"
+    # Keep the existing quoting style if the old value was double-quoted.
+    [[ "${old_raw:0:1}" == '"' && "${old_raw: -1}" == '"' && "${#old_raw}" -ge 2 ]] && q='"'
+    new_line="${prefix}${name}=${q}${value}${q}"
+    old_show="$(_show "$name" "$(_unquote "$old_raw")")"
+    where="line $((idx+1))"
+  else
+    [[ -z "$want_line" ]] || die "$name is not in $ENV_FILE (it would be appended; drop --line)"
+    new_line="${name}=${value}"
+    old_show="(absent)"
+    where="new line $(( ${#lines[@]} + 1 ))"
+  fi
+  # Secret-ness is judged on BOTH sides, so a secret never leaks via either value.
+  if _is_secret "$name" "$value" || { [[ "$idx" -ge 0 ]] && _is_secret "$name" "$(_unquote "$old_raw")"; }; then
+    new_show="$(_mask "$value")"
+    [[ "$idx" -ge 0 ]] && old_show="$(_mask "$(_unquote "$old_raw")")"
+  else
+    new_show="$(_show "$name" "$value")"
+  fi
+  if [[ "$idx" -ge 0 && "$(_unquote "$old_raw")" == "$value" ]]; then
+    echo "$TARGET $ENV_FILE $where: $name already has this value — nothing to do"; return 0
+  fi
+
+  local diff="$TARGET $ENV_FILE $where: $name: $old_show → $new_show"
+  echo "Proposed change — $diff" >&2
+  approve "deploy env-set — $diff (a backup of $ENV_FILE is taken first)"
+
+  # The file must not have changed while the owner was deciding.
+  [[ "$(sha256sum "$p" | cut -d' ' -f1)" == "$sum" ]] || die "$ENV_FILE changed while waiting for approval — re-run"
+
+  local bdir bfile tmp
+  bdir="$BACKUP_BASE/$TARGET/env-backups"
+  install -d -m 0700 -o root -g root "$BACKUP_BASE" "$BACKUP_BASE/$TARGET" "$bdir"
+  bfile="$(basename "$ENV_FILE")"; bfile="$bdir/${bfile#.}.$(date -u +%Y%m%dT%H%M%SZ).$$"   # no dotfile: visible to ls
+  cp --no-preserve=ownership "$p" "$bfile"; chmod 0600 "$bfile"
+  # keep the newest $BACKUP_KEEP backups
+  ls -1t "$bdir" | tail -n +$((BACKUP_KEEP+1)) | while IFS= read -r old; do rm -f -- "$bdir/$old"; done
+
+  if [[ "$idx" -ge 0 ]]; then lines[idx]="${new_line}${cr}"; else lines+=("$new_line"); fi
+  tmp="$(mktemp "$(dirname "$p")/.llm2ssh-env.XXXXXX")"
+  printf '%s\n' "${lines[@]}" >"$tmp"
+  chown --reference="$p" "$tmp"; chmod --reference="$p" "$tmp"
+  mv -f "$tmp" "$p"
+  audit "env-set $TARGET $name ($where); backup $bfile"
+  echo "✅ Applied — $diff"
+  echo "Backup: $bfile (root-only; restore: sudo cp '$bfile' '$p')"
+  echo "Note: running containers see the new value only after a restart/redeploy."
+}
+
+# ---- actions ----------------------------------------------------------------
+_run_logged() {
+  local what="$1" rc; shift
+  audit "start $what"
+  set +e; "$@"; rc=$?; set -e
+  audit "end $what rc=$rc" "$([[ $rc -eq 0 ]] && echo info || echo warning)"
+  return "$rc"
+}
+
+cmd_list() {
+  local f t
+  [[ -d "$CONF_DIR" ]] || { echo "no deploy targets configured ($CONF_DIR missing)"; return 0; }
+  for f in "$CONF_DIR"/*.conf; do
+    [[ -e "$f" ]] || continue
+    t="$(basename "$f" .conf)"
+    ( load_target "$t" 2>/dev/null ) || { printf '%s  (misconfigured — ask the owner)\n' "$t"; continue; }
+    ( load_target "$t"
+      printf '%s  (%s, as %s)\n' "$TARGET" "$DIR" "$RUN_AS"
+      printf '    update git-log git-status'
+      [[ -n "$ENV_FILE" ]] && printf ' env-show env-set'
+      printf '\n'
+      [[ ${#COMPOSE[@]} -gt 0 ]] && printf '    compose: %s\n' "${!COMPOSE[*]}"
+      [[ ${#QUERY[@]} -gt 0 ]] && printf '    query: %s\n' "${!QUERY[*]}"
+      [[ ${#CONTAINERS[@]} -gt 0 ]] && printf '    restart-policy containers: %s\n' "${CONTAINERS[*]}"
+      [[ ${#ENV_EDIT[@]} -gt 0 ]] && printf '    env-edit: %s (each change needs owner approval)\n' "${ENV_EDIT[*]}"
+      [[ ${#CONFIRM[@]} -gt 0 ]] && printf '    owner approval also for: %s\n' "${CONFIRM[*]}"
+      true )
+  done
+}
+
+verb="${1:-}"; shift || true
+case "$verb" in
+  list) [[ $# -eq 0 ]] || usage; cmd_list ;;
+  update)
+    [[ $# -eq 1 ]] || usage
+    load_target "$1"; require_closed_tree "$UPDATE_SCRIPT" .git; _lock
+    [[ -f "$DIR/$UPDATE_SCRIPT" ]] || die "$UPDATE_SCRIPT not found in $TARGET" 4
+    maybe_confirm update "deploy update $TARGET (./$UPDATE_SCRIPT)"
+    _run_logged "update $TARGET" as_owner bash "./$UPDATE_SCRIPT"
+    ;;
+  compose)
+    [[ $# -eq 2 ]] || usage
+    load_target "$1"; [[ -n "${COMPOSE[$2]:-}" ]] || die "no compose '$2' for '$TARGET'" 4
+    file="${COMPOSE[$2]}"; require_closed_tree "$file" ${ENV_FILE:+"$ENV_FILE"}; _lock
+    [[ -f "$DIR/$file" ]] || die "$file not found in $TARGET" 4
+    envs=(); for kv in ${COMPOSE_ENV[@]+"${COMPOSE_ENV[@]}"}; do
+      v="${kv#*=}"
+      v="${v//%DIR_UID%/$(stat -c %u "$DIR")}"; v="${v//%DIR_GID%/$(stat -c %g "$DIR")}"
+      v="${v//%DOCKER_GID%/$(stat -c %g /var/run/docker.sock 2>/dev/null || echo 0)}"
+      envs+=("${kv%%=*}=$v")
+    done
+    args=(docker compose)
+    [[ -n "$ENV_FILE" && -f "$DIR/$ENV_FILE" ]] && args+=(--env-file "$ENV_FILE")
+    args+=(-f "$file" up -d --build --force-recreate)
+    maybe_confirm compose "deploy compose $TARGET $2 (${args[*]})"
+    _run_logged "compose $TARGET $2" as_owner ${envs[@]+"${envs[@]}"} "${args[@]}"
+    ;;
+  query)
+    [[ $# -eq 2 ]] || usage
+    load_target "$1"; [[ -n "${QUERY[$2]:-}" ]] || die "no query '$2' for '$TARGET'" 4
+    IFS=$'\t' read -r qc qu qd qs <<<"${QUERY[$2]}"
+    # Read-only at the server: the session refuses writes even if the SQL tried.
+    ( cd "$DIR" && printf '%s\n' "$qs" | timeout -k 10 120 \
+        setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --init-groups -- \
+        env -i HOME="$RUN_HOME" PATH="$SAFE_PATH" LANG=C.UTF-8 \
+        docker exec -i -e "PGOPTIONS=-c default_transaction_read_only=on" "$qc" \
+          psql -U "$qu" -d "$qd" -v ON_ERROR_STOP=1 -P pager=off -x -f - )
+    ;;
+  git-log)
+    [[ $# -eq 1 ]] || usage
+    load_target "$1"
+    as_owner git --no-pager log -1 --format='commit %H%nAuthor: %an%nDate:   %cI%n%n    %s%n' --stat
+    ;;
+  git-status)
+    [[ $# -eq 1 ]] || usage
+    load_target "$1"
+    as_owner git --no-pager status --short --branch --untracked-files=no
+    ;;
+  restart-policy)
+    [[ $# -eq 3 ]] || usage
+    load_target "$1"
+    [[ "$2" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$ ]] || die "bad container name" 2
+    _in_list "$2" ${CONTAINERS[@]+"${CONTAINERS[@]}"} || die "container '$2' is not listed for '$TARGET'"
+    [[ "$3" =~ ^(no|always|unless-stopped|on-failure(:[0-9]{1,3})?)$ ]] || die "bad restart policy" 2
+    maybe_confirm restart-policy "deploy restart-policy $TARGET $2 $3"
+    _run_logged "restart-policy $TARGET $2 $3" as_owner docker update --restart "$3" "$2"
+    ;;
+  env-show)
+    [[ $# -eq 1 ]] || usage
+    load_target "$1"; require_closed_tree ${ENV_FILE:+"$ENV_FILE"}; cmd_env_show
+    ;;
+  env-set)
+    [[ $# -ge 3 ]] || usage
+    load_target "$1"; shift; cmd_env_set "$@"
+    ;;
+  ""|-h|--help|help) usage ;;
+  *) die "verb '$verb' not allowed" 2 ;;
+esac

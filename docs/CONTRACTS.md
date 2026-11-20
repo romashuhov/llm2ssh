@@ -34,6 +34,9 @@ attacker with a root shell. Therefore:
 | `/usr/local/bin/llm2ssh` | root 0755 | CLI entrypoint |
 | `/usr/local/lib/llm2ssh/` | root 0755 | code (lib, profiles, wrappers, hooks, bot); upgraded in place |
 | `/usr/local/lib/llm2ssh/bin/llm2ssh-svc` | root 0755 | sudo-whitelisted systemctl wrapper |
+| `/usr/local/lib/llm2ssh/bin/llm2ssh-deploy` | root 0755 | sudo-whitelisted deploy wrapper (`deploy` profile) |
+| `/etc/llm2ssh/deploy.d/<target>.conf` | root 0644 | deploy targets (parsed, never sourced) |
+| `/var/lib/llm2ssh/deploy/<target>/env-backups/` | root 0700 | `.env` backups taken before each approved edit |
 | `/usr/local/bin/llm2ssh-approve` | root 0755 | approval spool client (agents may call) |
 | `/usr/local/bin/llm2ssh-ctx` | root 0755 | prints the agent's live context |
 | `/etc/llm2ssh/config` | root 0600 | global config (may hold TG token) |
@@ -66,7 +69,8 @@ readable by them.
 Line-oriented directives, **parsed, never `source`d** (sourcing a shared profile
 would be RCE as root). Directives: `name`, `description`, `include <profile>`
 (one level, for `observer`), `group <grp>`, `sudo <Cmnd spec>`,
-`needs-services yes`, `warn <text>`, `sudo-all yes`. Unknown directive = hard
+`needs-services yes`, `warn <text>`, `sudo-all yes`, `ask <glob>`, `requestable yes`,
+`ttl-required yes`. Unknown directive = hard
 error. Each `sudo` line is validated: absolute path, binary exists, contains
 none of `, : = \ ( )` or newline (sudoers metacharacters → alias injection), and
 is not on the shell-escape/pager denylist. The Claude-layer allow/deny lists are

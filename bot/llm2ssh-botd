@@ -65,6 +65,10 @@ _bot_request_card() {
         --arg f "g:$id:0:$profile" --arg x "g:$id:x:$profile" '
     [ [ {text:"⏱ 1h",callback_data:$h1}, {text:"⏱ 4h",callback_data:$h4}, {text:"⏱ 1d",callback_data:$d1} ],
       [ {text:"♾ Forever",callback_data:$f}, {text:"❌ Deny",callback_data:$x} ] ]')"
+  # Time-limited profiles (ttl-required) get no "Forever" button.
+  if profile_requires_ttl "$profile"; then
+    kb="$(jq -c '.[1] |= map(select(.text != "♾ Forever"))' <<<"$kb")"
+  fi
   text="🔐 Access request from agent '$agent'
 Profile: $profile — ${desc:-(details: llm2ssh profile show $profile)}"
   [[ -n "$reason" ]] && text+="

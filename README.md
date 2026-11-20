@@ -73,7 +73,9 @@ sudo llm2ssh unfreeze bot                              # when you're ready
 ## Permission profiles
 
 `observer` → `observer-logs` → `docker-ro` → `docker-admin` → `services` →
-`full`. Preview any with `llm2ssh profile show <name>`; write your own in
+`full`, plus `deploy` — ship owner-listed projects (update.sh, deploy-agent
+recreate, `.env` edits approved in Telegram) as their owner, time-limited only; see
+[docs/DEPLOY.md](docs/DEPLOY.md). Preview any with `llm2ssh profile show <name>`; write your own in
 `/etc/llm2ssh/profiles.d/`. Full format in [docs/PROFILES.md](docs/PROFILES.md).
 
 ## Telegram bot (optional)
