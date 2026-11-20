@@ -151,6 +151,9 @@ cmd_grant() {
   if [[ "${P_TTL_REQUIRED:-0}" -eq 1 && -z "$ttl" ]]; then
     die_usage "profile '$profile' may only be granted for a limited time — add --ttl (e.g. --ttl 1h)"
   fi
+  if [[ "${P_TTL_MAX:-0}" -gt 0 && -n "$ttl" && "$(ttl_to_seconds "$ttl")" -gt "$P_TTL_MAX" ]]; then
+    die_usage "profile '$profile' may be granted for at most ${P_TTL_MAX}s — lower --ttl"
+  fi
 
   if [[ "$P_NEEDS_SERVICES" -eq 1 ]]; then
     [[ -n "$services" ]] || die_usage "profile '$profile' requires --services <unit,...>"

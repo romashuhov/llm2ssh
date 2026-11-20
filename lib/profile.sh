@@ -12,6 +12,7 @@
 #   P_NEEDS_SERVICES           — 0/1 (requires --services)
 #   P_SUDO_ALL                 — 0/1 (full root)
 #   P_TTL_REQUIRED             — 0/1 (grant only with --ttl)
+#   P_TTL_MAX                  — max --ttl in seconds (0 = no ceiling)
 
 [[ -n "${_LLM2SSH_PROFILE_SOURCED:-}" ]] && return 0
 _LLM2SSH_PROFILE_SOURCED=1
@@ -122,6 +123,9 @@ _profile_parse_into() {
       ask)         P_ASK+=("$rest") ;;
       requestable) [[ "$is_include" == 0 && "$rest" == "yes" ]] && P_REQUESTABLE=1 ;;
       ttl-required) [[ "$is_include" == 0 && "$rest" == "yes" ]] && P_TTL_REQUIRED=1 ;;
+      ttl-max)
+        [[ "$rest" =~ ^[0-9]+[smhd]$ ]] || die_validation "bad ttl-max '$rest' (use e.g. 4h)"
+        [[ "$is_include" == 0 ]] && P_TTL_MAX="$(_dur_seconds "$rest")" ;;
       needs-services) [[ "$rest" == "yes" ]] && P_NEEDS_SERVICES=1 ;;
       sudo-all)       [[ "$rest" == "yes" ]] && P_SUDO_ALL=1 ;;
       include)
@@ -160,7 +164,7 @@ profile_load() {
   file="$(profile_file "$name")" || die_notfound "no such profile: '$name'"
   P_NAME="$name"; P_DESC=""
   P_GROUPS=(); P_SUDO=(); P_WARN=(); P_ASK=()
-  P_NEEDS_SERVICES=0; P_SUDO_ALL=0; P_REQUESTABLE=0; P_TTL_REQUIRED=0
+  P_NEEDS_SERVICES=0; P_SUDO_ALL=0; P_REQUESTABLE=0; P_TTL_REQUIRED=0; P_TTL_MAX=0
   _PROFILE_VISITED=" $name "     # top profile counts as visited (self-include guard)
   _profile_parse_into "$file"
 }
@@ -178,6 +182,20 @@ profile_is_requestable() {
 profile_requires_ttl() {
   local f; f="$(profile_file "$1")" || return 1
   grep -qE '^[[:space:]]*ttl-required[[:space:]]+yes([[:space:]]|$)' "$f"
+}
+
+# _dur_seconds 30m|4h|2d -> seconds (input already validated).
+_dur_seconds() {
+  local n="${1%[smhd]}" u="${1: -1}"
+  case "$u" in s) echo "$n" ;; m) echo $((n*60)) ;; h) echo $((n*3600)) ;; d) echo $((n*86400)) ;; esac
+}
+
+# profile_ttl_max NAME -> the profile's ttl-max in seconds, or 0 (no ceiling).
+# Cheap read (no full parse) — used by the bot to hide too-long buttons.
+profile_ttl_max() {
+  local f v; f="$(profile_file "$1")" || { echo 0; return; }
+  v="$(sed -n 's/^[[:space:]]*ttl-max[[:space:]]\{1,\}\([0-9]\{1,\}[smhd]\)[[:space:]]*$/\1/p' "$f" | head -n1)"
+  if [[ -n "$v" ]]; then _dur_seconds "$v"; else echo 0; fi
 }
 
 # list_requestable_profiles -> names an agent may request (one per line).
@@ -236,6 +254,7 @@ cmd_profile() {
       [[ "$P_NEEDS_SERVICES" -eq 1 ]] && printf 'requires: --services <unit,...>\n'
       [[ "$P_REQUESTABLE" -eq 1 ]] && printf 'requestable: yes (an agent may ask for this via llm2ssh-request)\n'
       [[ "$P_TTL_REQUIRED" -eq 1 ]] && printf 'ttl-required: yes (only granted with --ttl)\n'
+      [[ "$P_TTL_MAX" -gt 0 ]] && printf 'ttl-max: %ss\n' "$P_TTL_MAX"
       if [[ ${#P_ASK[@]} -gt 0 ]]; then
         printf 'owner approval required for:\n'
         local a; for a in "${P_ASK[@]}"; do printf '  %s\n' "$a"; done

@@ -118,6 +118,53 @@ bot_msg_authorized() {
   [[ -n "${OWNER_USER_ID:-}" && "$1" == "$OWNER_USER_ID" && "$2" == "$OWNER_CHAT_ID" ]]
 }
 
+# bot_kb_limit PROFILE — filter a duration keyboard (JSON on stdin) for the
+# profile's limits: no "Forever" for ttl-required/ttl-max profiles, and no
+# duration button longer than ttl-max. Display only — `grant` enforces both.
+bot_kb_limit() {
+  local p="$1" req=0 max
+  profile_requires_ttl "$p" 2>/dev/null && req=1
+  max="$(profile_ttl_max "$p" 2>/dev/null || echo 0)"
+  [[ "$max" =~ ^[0-9]+$ ]] || max=0
+  jq -c --argjson req "$req" --argjson max "$max" '
+    def secs: {"⏱ 1h":3600, "⏱ 4h":14400, "⏱ 1d":86400}[.text];
+    map(map(select(
+        (if .text == "♾ Forever" then ($req == 0 and $max == 0) else true end)
+        and (if (secs) != null and $max > 0 then (secs) <= $max else true end)
+      )))
+    | map(select(length > 0))'
+}
+
+# bot_approval_card ID -> sets CARD_USER and CARD_TEXT for an approval request.
+# The requester is the request FILE OWNER: an agent's own requests (Claude hook)
+# are owned by the agent and their json `user` field is ignored. Only a ROOT-owned
+# request — written by a root sudo wrapper on the agent's behalf — may name the
+# agent in `user`, and only those get the 🔒 <wrapper> label, so an agent cannot
+# dress its own request up as a wrapper card. Control chars are stripped.
+bot_approval_card() {
+  local id="$1" f owner src cmd to label
+  f="$APPROVAL_REQ/$id.json"
+  [[ "$id" =~ ^[0-9a-f]{8}$ && -f "$f" ]] || return 1
+  owner="$(stat -c %U "$f" 2>/dev/null || echo '')"
+  src="$(approval_req_field "$id" source | tr -cd 'a-z0-9-' | cut -c1-32)"
+  cmd="$(approval_req_field "$id" command)"
+  cmd="$(printf '%s' "$cmd" | tr '\000-\037\177' ' ' | cut -c1-900)"
+  to="$(approval_req_field "$id" timeout_s)"; [[ "$to" =~ ^[0-9]{1,5}$ ]] || to="${APPROVAL_TIMEOUT_S:-60}"
+  if [[ "$owner" == "root" ]]; then
+    CARD_USER="$(approval_req_field "$id" user)"
+    case "$src" in
+      llm2ssh-deploy) label="🔒 llm2ssh-deploy" ;;
+      sudo-wrapper)   label="🔒 llm2ssh-svc" ;;
+      *)              label="🔒 ${src:-root}" ;;
+    esac
+  else
+    CARD_USER="$owner"; label="🛑 Approval needed"
+  fi
+  [[ "$CARD_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || return 1
+  # shellcheck disable=SC2034  # read by the daemon
+  CARD_TEXT="$label (agent $CARD_USER): $cmd (auto-deny in ${to}s)"
+}
+
 # bot_request_write_res ID DECISION [NOTE] — mint an access-request decision.
 bot_request_write_res() {
   local id="$1" decision="$2" note="${3:-}" res tmp

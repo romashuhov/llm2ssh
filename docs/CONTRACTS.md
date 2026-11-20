@@ -37,6 +37,7 @@ attacker with a root shell. Therefore:
 | `/usr/local/lib/llm2ssh/bin/llm2ssh-deploy` | root 0755 | sudo-whitelisted deploy wrapper (`deploy` profile) |
 | `/etc/llm2ssh/deploy.d/<target>.conf` | root 0644 | deploy targets (parsed, never sourced) |
 | `/var/lib/llm2ssh/deploy/<target>/env-backups/` | root 0700 | `.env` backups taken before each approved edit |
+| `/var/log/llm2ssh/deploy/<target>/` | root 0700 | detached update/compose run logs (read via `llm2ssh-deploy status`) |
 | `/usr/local/bin/llm2ssh-approve` | root 0755 | approval spool client (agents may call) |
 | `/usr/local/bin/llm2ssh-ctx` | root 0755 | prints the agent's live context |
 | `/etc/llm2ssh/config` | root 0600 | global config (may hold TG token) |
@@ -70,7 +71,7 @@ Line-oriented directives, **parsed, never `source`d** (sourcing a shared profile
 would be RCE as root). Directives: `name`, `description`, `include <profile>`
 (one level, for `observer`), `group <grp>`, `sudo <Cmnd spec>`,
 `needs-services yes`, `warn <text>`, `sudo-all yes`, `ask <glob>`, `requestable yes`,
-`ttl-required yes`. Unknown directive = hard
+`ttl-required yes`, `ttl-max <dur>`. Unknown directive = hard
 error. Each `sudo` line is validated: absolute path, binary exists, contains
 none of `, : = \ ( )` or newline (sudoers metacharacters → alias injection), and
 is not on the shell-escape/pager denylist. The Claude-layer allow/deny lists are
@@ -93,10 +94,15 @@ Directories (created by tmpfiles.d):
 
 **Request JSON** (`req/<id>.json`):
 ```json
-{ "id":"9f3a1c2e", "ts":1752912000, "source":"claude-hook|sudo-wrapper|cli",
+{ "id":"9f3a1c2e", "ts":1752912000, "source":"claude-hook|sudo-wrapper|llm2ssh-deploy|cli",
   "user":"llmagent", "profile":"services", "command":"systemctl restart nginx",
   "cwd":"/home/llmagent/workspace", "timeout_s":180 }
 ```
+
+**Requester:** the bot takes the requester from the req **file owner**. Only a
+root-owned request (written by a root sudo wrapper) may name the agent in `user`,
+and only such cards carry the `🔒 <wrapper>` label. Control characters in `command`
+are replaced by spaces before display.
 
 **Response JSON** (`res/<id>.json`, written by bot or local approver):
 ```json
