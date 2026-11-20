@@ -65,6 +65,8 @@ _bot_request_card() {
         --arg f "g:$id:0:$profile" --arg x "g:$id:x:$profile" '
     [ [ {text:"⏱ 1h",callback_data:$h1}, {text:"⏱ 4h",callback_data:$h4}, {text:"⏱ 1d",callback_data:$d1} ],
       [ {text:"♾ Forever",callback_data:$f}, {text:"❌ Deny",callback_data:$x} ] ]')"
+  # Time-limited profiles: no "Forever", nothing longer than ttl-max.
+  kb="$(bot_kb_limit "$profile" <<<"$kb")"
   text="🔐 Access request from agent '$agent'
 Profile: $profile — ${desc:-(details: llm2ssh profile show $profile)}"
   [[ -n "$reason" ]] && text+="
@@ -88,15 +90,15 @@ spool_watcher() {
     local id
     while IFS= read -r id; do
       [[ -z "$id" || -n "${notified[$id]:-}" ]] && continue
-      local user cmd
-      user="$(approval_req_field "$id" user)"; cmd="$(approval_req_field "$id" command)"
-      if approval_is_frozen "$user"; then
+      # Requester = req FILE OWNER (see bot_approval_card), never the json field.
+      bot_approval_card "$id" || { notified[$id]=1; continue; }
+      if approval_is_frozen "$CARD_USER"; then
         approval_write_decision "$id" deny freeze "agent frozen"; notified[$id]=1; continue
       fi
       local kb
       kb="$(jq -nc --arg a "a:$id:1" --arg d "a:$id:0" \
             '[[{text:"✅ Allow",callback_data:$a},{text:"❌ Deny",callback_data:$d}]]')"
-      tg_send_keyboard "$OWNER_CHAT_ID" "🛑 Approval needed ($user): $cmd (auto-deny in ${APPROVAL_TIMEOUT_S}s)" "$kb"
+      tg_send_keyboard "$OWNER_CHAT_ID" "$CARD_TEXT" "$kb"
       notified[$id]=1
     done < <(approval_pending)
     # Pending ACCESS requests -> a card with duration buttons (once each). The

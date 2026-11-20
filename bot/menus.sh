@@ -93,7 +93,7 @@ _kb_duration() {
     [{text:"⏱ 1h",callback_data:$h1},{text:"⏱ 4h",callback_data:$h4}],
     [{text:"⏱ 1d",callback_data:$d1},{text:"♾ Forever",callback_data:$pm}],
     [{text:"« Cancel",callback_data:$back}]
-  ]'
+  ]' | if declare -F bot_kb_limit >/dev/null; then bot_kb_limit "$p"; else cat; fi
 }
 
 # ---- sending / editing ------------------------------------------------------

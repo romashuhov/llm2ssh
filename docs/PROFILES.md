@@ -12,6 +12,7 @@ agent between profiles (`llm2ssh grant <agent> <profile>`) is the core operation
 | `observer-hw` | `observer` + root-only hardware reads (`dmidecode` no-args, `smartctl --scan`) | For SMART/DMI info. Most hardware tools (`sensors`, `lspci`, `lshw`, `iostat`) need no sudo. |
 | `docker-ro` | `sudo docker ps/logs/stats/inspect/images/...` (read-only) | Via sudo whitelist; the `docker` group is never used. `inspect`/`logs` can leak env secrets. |
 | `docker-admin` | `docker-ro` + `start/stop/restart/pull/rm/prune/...` | **Excludes** `run/exec/cp/build/compose up` — each is root-equivalent. |
+| `deploy` | `observer` + `docker ps/images/stats/system df` + owner-defined deploy actions via `llm2ssh-deploy` (update.sh / compose recreate approved per run with the commit range, read-only SQL, git log, `.env` masked view and per-edit approved changes), run **as the project owner** | Runs repository code as the owner — not a sandbox. `ttl-required`, `ttl-max 4h`. No `inspect`/`logs`. See [DEPLOY.md](DEPLOY.md). |
 | `services` | restart/reload a fixed allowlist of systemd units | `llm2ssh grant a services --services nginx,redis`. Goes through a gated wrapper. |
 | `full` | `sudo ALL` — unrestricted root | Requires typed confirmation. Use `--ttl ... --kill-on-expiry`. |
 
@@ -33,6 +34,9 @@ name.
 | `group <grp>` | Supplementary group to add to the agent (e.g. `adm`). |
 | `sudo <Cmnd spec>` | A sudoers command the agent may run as root, NOPASSWD. Use the `%DOCKER%` token for the docker binary (resolved at grant time, snap-aware). |
 | `ask <pattern>` | A Bash-command glob that requires owner approval (via the broker) in Mode B before Claude runs it. |
+| `requestable yes` | The agent may ask for it via `llm2ssh-request`. |
+| `ttl-required yes` | Only grantable with `--ttl` (no "Forever" button in the bot). |
+| `ttl-max <dur>` | Ceiling for `--ttl` (e.g. `4h`); longer buttons are hidden in the bot. |
 | `needs-services yes` | Profile requires `--services <unit,...>` at grant time. |
 | `warn <text>` | Printed at grant time and shown in the agent's context. |
 | `sudo-all yes` | Grants unrestricted root (`full`). Mutually exclusive with `sudo` lines. |
@@ -110,7 +114,7 @@ Security: an agent can only request `requestable` profiles (never `full`/root),
 and the bot takes the requesting agent from the **request file's owner**, not any
 self-declared field — so one agent can't request access for another. Shipped
 requestable profiles: `disk-audit`, `docker-ro`, `docker-admin`, `observer-logs`,
-`observer-hw`. Mark your own with `requestable yes`.
+`observer-hw`, `deploy` (time-limited only). Mark your own with `requestable yes`.
 
 `disk-audit` is a ready example: read-only `du`, `docker system df`, and journal
 usage — exactly enough to find what fills a disk, nothing to change it.
